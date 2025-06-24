@@ -1357,6 +1357,14 @@ impl<'a> Backtest<'a> {
         (NO_POS, NO_POS, Order::default())
     }
 
+    fn position_full(&mut self, idx: usize, pside: usize, k: usize) {
+        let size = self.positions.long[&idx].size;
+        let price = self.positions.long[&idx].price;
+        
+        let we = calc_wallet_exposure(self.exchange_params_list[idx].c_mult, self.balance.usd_total_rounded, size, price);
+        println!("Position full k: {}, size: {}, price: {}, WE: {}", k, size, price, we);
+    }
+
     fn update_open_orders_any_fill(&mut self, k: usize) {
         if self.trading_enabled.long {
             if self.trailing_enabled.long {
@@ -1378,6 +1386,10 @@ impl<'a> Backtest<'a> {
             for &idx in &active_long_indices {
                 self.update_stuck_status(idx, LONG);
                 self.update_open_orders_long_single(k, idx);
+                let has_non_empty_entries = self.open_orders.long[&idx].entries.iter().any(|order| order.order_type != OrderType::Empty);
+                if !has_non_empty_entries {
+                    self.position_full(idx, LONG, k);
+                }
             }
         }
         if self.trading_enabled.short {
@@ -1400,6 +1412,11 @@ impl<'a> Backtest<'a> {
             for &idx in &active_short_indices {
                 self.update_stuck_status(idx, SHORT);
                 self.update_open_orders_short_single(k, idx);
+                let has_non_empty_entries = self.open_orders.short[&idx].entries.iter().any(|order| order.order_type != OrderType::Empty);
+                if !has_non_empty_entries {
+                    self.position_full(idx, SHORT, k);
+                }
+
             }
         }
         let (unstucking_idx, unstucking_pside, unstucking_close) = self.calc_unstucking_close(k);
@@ -1464,6 +1481,10 @@ impl<'a> Backtest<'a> {
                     })
                 {
                     self.update_open_orders_long_single(k, idx);
+                let has_non_empty_entries = self.open_orders.long[&idx].entries.iter().any(|order| order.order_type != OrderType::Empty);
+                if !has_non_empty_entries {
+                    self.position_full(idx, LONG, k);
+                }
                 }
             }
         }
@@ -1501,6 +1522,10 @@ impl<'a> Backtest<'a> {
                     })
                 {
                     self.update_open_orders_short_single(k, idx);
+                let has_non_empty_entries = self.open_orders.short[&idx].entries.iter().any(|order| order.order_type != OrderType::Empty);
+                if !has_non_empty_entries {
+                    self.position_full(idx, SHORT, k);
+                }
                 }
             }
         }

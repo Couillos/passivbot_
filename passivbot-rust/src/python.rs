@@ -211,6 +211,8 @@ fn extract_bool_value(dict: &PyDict, key: &str) -> PyResult<bool> {
 
 fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
     Ok(BotParams {
+        hedge_open_threshold: extract_value(dict, "hedge_open_threshold")?,
+        hedge_close_threshold: extract_value(dict, "hedge_close_threshold")?,
         close_grid_markup_end: extract_value(dict, "close_grid_markup_end")?,
         close_grid_markup_start: extract_value(dict, "close_grid_markup_start")?,
         close_grid_qty_pct: extract_value(dict, "close_grid_qty_pct")?,

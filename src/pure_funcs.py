@@ -516,6 +516,8 @@ def get_template_live_config(passivbot_mode="v7"):
             },
             "bot": {
                 "long": {
+                    "hedge_open_threshold": 0.30,
+                    "hedge_close_threshold": 0.05,
                     "close_grid_markup_end": 0.0089,
                     "close_grid_markup_start": 0.0344,
                     "close_grid_qty_pct": 0.125,
@@ -546,6 +548,8 @@ def get_template_live_config(passivbot_mode="v7"):
                     "unstuck_threshold": 0.916,
                 },
                 "short": {
+                    "hedge_open_threshold": 0.30,
+                    "hedge_close_threshold": 0.05,
                     "close_grid_markup_end": 0.0089,
                     "close_grid_markup_start": 0.0344,
                     "close_grid_qty_pct": 0.125,
@@ -602,6 +606,8 @@ def get_template_live_config(passivbot_mode="v7"):
             },
             "optimize": {
                 "bounds": {
+                    "long_hedge_open_threshold": [0.0, 0.5],
+                    "long_hedge_close_threshold": [0.0, 0.5],
                     "long_close_grid_markup_end": [0.001, 0.03],
                     "long_close_grid_markup_start": [0.001, 0.03],
                     "long_close_grid_qty_pct": [0.05, 1.0],

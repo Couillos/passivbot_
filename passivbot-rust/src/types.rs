@@ -96,6 +96,8 @@ pub struct BotParamsPair {
 
 #[derive(Clone, Default, Debug)]
 pub struct BotParams {
+    pub hedge_open_threshold: f64,
+    pub hedge_close_threshold: f64,
     pub close_grid_markup_end: f64,
     pub close_grid_markup_start: f64,
     pub close_grid_qty_pct: f64,
