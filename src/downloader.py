@@ -11,6 +11,7 @@ import sys
 import traceback
 import zipfile
 from collections import deque
+from datetime import timedelta, timezone
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
@@ -27,6 +28,7 @@ import numpy as np
 import pandas as pd
 from dateutil import parser
 from tqdm import tqdm
+from tqdm.asyncio import tqdm_asyncio as tqdm_async
 from pure_funcs import (
     date_to_ts,
     ts_to_date_utc,
@@ -47,11 +49,24 @@ from procedures import (
 
 # ========================= CONFIGURABLES & GLOBALS =========================
 
+class TqdmStream:
+    def write(self, msg):
+        if msg.rstrip():
+            tqdm.write(msg.rstrip())
+    def flush(self):
+        pass
+
+
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
     level=logging.INFO,
     datefmt="%Y-%m-%dT%H:%M:%S",
+    stream=TqdmStream()
 )
+
+BYBIT_FIRST_CANDLE_FILE = 'first_candles.json'
+BYBIT_MAX_REQUESTS_PER_5S = 600
+BYBIT_MAX_CONCURRENT_TASKS = BYBIT_MAX_REQUESTS_PER_5S // 5
 
 MAX_REQUESTS_PER_MINUTE = 120
 REQUEST_TIMESTAMPS = deque(maxlen=1000)  # for rate-limiting checks
@@ -647,39 +662,172 @@ class OHLCVManager:
             logging.error(f"binanceusdm Failed to download {url}: {e}")
             traceback.print_exc()
 
-    async def download_ohlcvs_bybit(self, coin: str):
-        # Bybit has public data archives
-        missing_days = await self.get_missing_days_ohlcvs(coin)
-        if not missing_days:
+
+    def load_first_candles(self):
+        if os.path.exists(BYBIT_FIRST_CANDLE_FILE):
+            with open(BYBIT_FIRST_CANDLE_FILE, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def save_first_candles(self, first_candles):
+        with open(BYBIT_FIRST_CANDLE_FILE, 'w') as f:
+            json.dump(first_candles, f)
+
+    async def get_first_timestamp_binary_search(self, symbol):
+        logging.info(f"Looking for first candle for {symbol} on {self.cc.id}")
+        now = self.cc.milliseconds()
+        low, high = 0, now
+        step = 24 * 3600 * 1000
+        first_ts = None
+        last_ts = None
+        while high - low > step:
+            mid = (low + high) // 2
+            logging.debug(f"low: {low}, high: {high}, mid: {mid}")
+            try:
+                ohlcv = await self.cc.fetch_ohlcv(f"{symbol}/USDT:USDT", '1d', since=mid, limit=2)
+            except Exception as e:
+                logging.warning(f"Failed fetching OHLCV data: {e}")
+                low = mid + step
+                continue
+            if ohlcv:
+                ts = ohlcv[0][0]
+                logging.debug(f"Timestamp found: {ts}")
+                if ts == last_ts:
+                    logging.info(f"Identical timestamp detected ({ts}), stopping binary search")
+                    return ts
+                last_ts = ts
+                first_ts = ts
+                high = mid
+                logging.debug(f"Candle found at {datetime.fromtimestamp(first_ts/1000, timezone.utc)} UTC, continue binary search")
+            else:
+                low = mid + step
+            await asyncio.sleep(self.cc.rateLimit / 1000)
+        if first_ts:
+            logging.info(f"First candle found at: {datetime.fromtimestamp(first_ts/1000, timezone.utc)} UTC")
+        else:
+            logging.error(f"No OHLCV data for {symbol} on {self.cc.id}")
+        return first_ts
+
+
+    def generate_date_range(self, start, end):
+        current = start
+        while current <= end:
+            yield current
+            current += timedelta(days=1)
+
+    def expected_timestamps_for_day(self, day_utc):
+        midnight = datetime.datetime(day_utc.year, day_utc.month, day_utc.day, tzinfo=timezone.utc)
+        return [(int((midnight + timedelta(minutes=i)).timestamp() * 1000)) for i in range(1440)]
+
+    async def is_day_complete(self, symbol, date):
+        symbol_dir = os.path.join(self.cache_filepaths['ohlcvs'], symbol)
+        out_file = os.path.join(symbol_dir, f"{date.strftime('%Y-%m-%d')}.npy")
+        if not os.path.exists(out_file):
+            return False
+        try:
+            data = np.load(out_file)
+            timestamps = set(int(row[0]) for row in data)
+            expected_ts = set(self.expected_timestamps_for_day(date))
+            is_complete = timestamps == expected_ts
+            if not is_complete:
+                logging.debug(f"{symbol} {date} is incomplete, adding it to the download queue")
+            return is_complete
+        except Exception:
+            return False
+
+    async def fetch_with_retry(self, symbol, date, first_ts, max_retries=5):
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                return await self.fetch_day(symbol, date, first_ts)
+            except Exception as e:
+                retry_count += 1
+                wait_time = (2 ** retry_count) + (0.1 * (2 ** retry_count))
+                logging.warning(f"Attempt {retry_count} failed for {symbol} {date}: {e}. Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+        logging.error(f"Max retries reached for {symbol} {date}. Skipping.")
+
+    async def fetch_day(self, symbol, date, first_ts):
+        day_start = int(datetime.datetime(date.year, date.month, date.day, tzinfo=timezone.utc).timestamp() * 1000)
+        day_end = day_start + 24 * 60 * 60 * 1000
+        if day_end < first_ts:
             return
-        symbolf = self.get_symbol(coin).replace("/USDT:", "")
-        dirpath = make_get_filepath(os.path.join(self.cache_filepaths["ohlcvs"], coin, ""))
+        symbol_dir = os.path.join(self.cache_filepaths['ohlcvs'], symbol)
+        os.makedirs(symbol_dir, exist_ok=True)
+        out_file = os.path.join(symbol_dir, f"{date.strftime('%Y-%m-%d')}.npy")
+        existing = {}
+        if os.path.exists(out_file):
+            try:
+                arr = np.load(out_file)
+                existing = {int(row[0]): row for row in arr}
+            except Exception:
+                existing = {}
+        expected_ts = set(self.expected_timestamps_for_day(date))
+        missing_ts = expected_ts - set(existing.keys())
+        if not missing_ts:
+            return
+        all_data = []
+        since = min(missing_ts)
+        while since < day_end:
+            try:
+                candles = await self.cc.fetch_ohlcv(f"{symbol}/USDT:USDT", '1m', since=since, limit=1000)
+            except Exception as e:
+                logging.error(f"{symbol} {date} fetch error: {e}")
+                raise
+            if not candles:
+                break
+            for c in candles:
+                ts = c[0]
+                if ts in expected_ts:
+                    all_data.append([ts, c[1], c[2], c[3], c[4], c[5]])
+            since = candles[-1][0] + 60_000
+            if since > day_end:
+                break
+            await asyncio.sleep(0.01)
+        for row in all_data:
+            existing[int(row[0])] = row
+        final = [existing[ts] for ts in sorted(expected_ts) if ts in existing]
+        if final and len(final) == 1440:
+            np.save(out_file, np.array(final, dtype=np.float64))
+            logging.info(f"{symbol} {date.strftime('%Y-%m-%d')}")
+        else:
+            logging.warning(f"{symbol} {date} incomplete ({len(final)}/{1440} candles). Missing candles")
 
-        # Copy from old directory first
-        old_dirpath = f"historical_data/ohlcvs_bybit/{symbolf}/"
-        if self.copy_ohlcvs_from_old_dir(dirpath, old_dirpath, missing_days, coin):
-            missing_days = await self.get_missing_days_ohlcvs(coin)
-            if not missing_days:
-                return
+    async def bounded_fetch(self, semaphore, *args):
+        async with semaphore:
+            await self.fetch_with_retry(*args)
 
-        # Bybit public data: "https://public.bybit.com/trading/"
-        base_url = "https://public.bybit.com/trading/"
-        webpage = urlopen(f"{base_url}{symbolf}/").read().decode()
+    async def download_ohlcvs_bybit(self, coin: str):
+        try:
+            START_DATE = datetime.datetime.strptime(self.start_date, '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d')
+        except Exception as e:
+            START_DATE = self.start_date
+        try:
+            END_DATE = datetime.datetime.strptime(self.end_date, '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d')
+        except Exception as e:
+            END_DATE = self.end_date
 
-        filenames = [
-            f"{symbolf}{day}.csv.gz" for day in missing_days if f"{symbolf}{day}.csv.gz" in webpage
-        ]
-        # Download concurrently
-        async with aiohttp.ClientSession() as session:
-            tasks = []
-            for fn in filenames:
-                url = f"{base_url}{symbolf}/{fn}"
-                day = fn[-17:-7]
-                await self.check_rate_limit()
-                tasks.append(
-                    asyncio.create_task(self.download_single_bybit(session, url, dirpath, day))
-                )
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Manual handling of rate limits
+        await self.cc.close()
+        self.cc = getattr(ccxt, self.exchange)({"enableRateLimit": False})
+        self.cc.options["defaultType"] = "swap"
+        semaphore = asyncio.Semaphore(BYBIT_MAX_CONCURRENT_TASKS)
+        start = datetime.datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end = datetime.datetime.strptime(END_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        first_candles = self.load_first_candles()
+        if coin not in first_candles:
+            first_ts = await self.get_first_timestamp_binary_search(coin)
+            first_candles[coin] = first_ts
+            self.save_first_candles(first_candles)
+        dates = list(self.generate_date_range(start, end))
+        tasks = []
+        first_ts = first_candles.get(coin)
+        for date in tqdm_async(dates, desc=f"Checking {coin} cached candles"):
+            if not await self.is_day_complete(coin, date):
+                tasks.append(asyncio.create_task(self.bounded_fetch(semaphore, coin, date, first_ts)))
+        await tqdm_async.gather(*tasks, desc=f"Downloading missing candles")
+        await self.cc.close()
 
     async def find_first_day_bybit(self, coin: str, webpage=None) -> float:
         symbolf = self.get_symbol(coin).replace("/USDT:", "")
