@@ -698,12 +698,12 @@ class OHLCVManager:
                 last_ts = ts
                 first_ts = ts
                 high = mid
-                logging.debug(f"Candle found at {datetime.fromtimestamp(first_ts/1000, timezone.utc)} UTC, continue binary search")
+                logging.debug(f"Candle found at {datetime.datetime.fromtimestamp(first_ts/1000, timezone.utc)} UTC, continue binary search")
             else:
                 low = mid + step
             await asyncio.sleep(self.cc.rateLimit / 1000)
         if first_ts:
-            logging.info(f"First candle found at: {datetime.fromtimestamp(first_ts/1000, timezone.utc)} UTC")
+            logging.info(f"First candle found at: {datetime.datetime.fromtimestamp(first_ts/1000, timezone.utc)} UTC")
         else:
             logging.error(f"No OHLCV data for {symbol} on {self.cc.id}")
         return first_ts
