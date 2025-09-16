@@ -18,6 +18,8 @@ use crate::utils::{
 use ndarray::{s, ArrayView1, ArrayView3, Axis};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use crate::profiler::{start_profiling, print_profiling_report};
+use crate::{profile_function, profile_block};
 
 #[derive(Clone, Default, Copy, Debug)]
 pub struct EmaAlphas {
@@ -118,6 +120,13 @@ struct RollingSum {
     prev_k_short: usize,
 }
 
+struct RollingNoisiness {
+    long: Vec<f64>,
+    short: Vec<f64>,
+    prev_k_long: usize,
+    prev_k_short: usize,
+}
+
 pub struct Backtest<'a> {
     hlcvs: &'a ArrayView3<'a, f64>,
     btc_usd_prices: &'a ArrayView1<'a, f64>, // Change to ArrayView1 (1D view)
@@ -150,6 +159,7 @@ pub struct Backtest<'a> {
     n_eligible_long: usize,
     n_eligible_short: usize,
     rolling_volume_sum: RollingSum,
+    rolling_noisiness: RollingNoisiness,
     volume_indices_buffer: Option<Vec<(f64, usize)>>,
 }
 
@@ -270,11 +280,22 @@ impl<'a> Backtest<'a> {
                 prev_k_long: 0,
                 prev_k_short: 0,
             },
+            rolling_noisiness: RollingNoisiness {
+                long: vec![0.0; n_coins],
+                short: vec![0.0; n_coins],
+                prev_k_long: 0,
+                prev_k_short: 0,
+            },
             volume_indices_buffer: Some(vec![(0.0, 0); n_coins]), // Initialize here
         }
     }
 
     pub fn run(&mut self) -> (Vec<Fill>, Equities) {
+        profile_function!();
+        
+        // Start global profiling
+        start_profiling();
+        
         let n_timesteps = self.hlcvs.shape()[0];
         for idx in 0..self.n_coins {
             self.trailing_prices
@@ -286,7 +307,10 @@ impl<'a> Backtest<'a> {
         }
 
         // --- find first & last valid candle for every coin (binary-search) ---
-        let (first_valid, last_valid) = find_valid_timestamp_bounds(&self.hlcvs);
+        let (first_valid, last_valid) = profile_block!("find_valid_timestamp_bounds", {
+            find_valid_timestamp_bounds(&self.hlcvs)
+        });
+        
         for idx in 0..self.n_coins {
             self.first_valid_timestamps.insert(idx, first_valid[idx]);
             if n_timesteps - last_valid[idx] > 1400 {
@@ -295,19 +319,46 @@ impl<'a> Backtest<'a> {
             }
         }
 
+        println!("Starting main backtest loop with {} timesteps", n_timesteps);
+        
         for k in 1..(n_timesteps - 1) {
-            self.check_for_fills(k);
-            self.update_emas(k);
-            self.update_rounded_balance(k);
-            self.update_trailing_prices(k);
-            self.update_n_positions_and_wallet_exposure_limits(k);
-            self.update_open_orders_all(k);
-            self.update_equities(k);
+            profile_block!("check_for_fills", {
+                self.check_for_fills(k);
+            });
+            
+            profile_block!("update_emas", {
+                self.update_emas(k);
+            });
+            
+            profile_block!("update_rounded_balance", {
+                self.update_rounded_balance(k);
+            });
+            
+            profile_block!("update_trailing_prices", {
+                self.update_trailing_prices(k);
+            });
+            
+            profile_block!("update_n_positions_and_wallet_exposure_limits", {
+                self.update_n_positions_and_wallet_exposure_limits(k);
+            });
+            
+            profile_block!("update_open_orders_all", {
+                self.update_open_orders_all(k);
+            });
+            
+            profile_block!("update_equities", {
+                self.update_equities(k);
+            });
         }
+        
+        // Print profiling report at the end
+        print_profiling_report();
+        
         (self.fills.clone(), self.equities.clone())
     }
 
     fn update_n_positions_and_wallet_exposure_limits(&mut self, k: usize) {
+        profile_function!();
         let last_ts = self.hlcvs.shape()[0] - 1;
         let eligible: Vec<usize> = (0..self.n_coins)
             .filter(|&idx| {
@@ -361,6 +412,7 @@ impl<'a> Backtest<'a> {
 
     #[inline(always)]
     fn update_rounded_balance(&mut self, k: usize) {
+        profile_function!();
         if self.balance.use_btc_collateral {
             // 1. raw, unrounded totals
             self.balance.usd_total = (self.balance.btc * self.btc_usd_prices[k]) + self.balance.usd;
@@ -386,6 +438,7 @@ impl<'a> Backtest<'a> {
     }
 
     pub fn calc_preferred_coins(&mut self, k: usize, pside: usize) -> Vec<usize> {
+        profile_function!();
         let n_positions = match pside {
             LONG => self.effective_n_positions.long,
             SHORT => self.effective_n_positions.short,
@@ -451,29 +504,92 @@ impl<'a> Backtest<'a> {
             .collect()
     }
 
-    fn rank_by_noisiness(&self, k: usize, candidates: &[usize], pside: usize) -> Vec<usize> {
+    fn rank_by_noisiness(&mut self, k: usize, candidates: &[usize], pside: usize) -> Vec<usize> {
+        profile_function!();
         let bot_params = match pside {
             LONG => &self.bot_params_master.long,
             SHORT => &self.bot_params_master.short,
             _ => panic!("Invalid pside"),
         };
-        let start_k = k.saturating_sub(bot_params.filter_noisiness_rolling_window);
+        let window = bot_params.filter_noisiness_rolling_window;
+        let start_k = k.saturating_sub(window);
 
-        let mut noisinesses: Vec<(f64, usize)> = candidates
-            .iter()
-            .map(|&idx| {
-                let noisiness: f64 = self
-                    .hlcvs
-                    .slice(s![start_k..k, idx, ..])
+        let (rolling_noisiness, prev_k) = match pside {
+            LONG => (
+                &mut self.rolling_noisiness.long,
+                &mut self.rolling_noisiness.prev_k_long,
+            ),
+            SHORT => (
+                &mut self.rolling_noisiness.short,
+                &mut self.rolling_noisiness.prev_k_short,
+            ),
+            _ => panic!("Invalid pside"),
+        };
+
+        // Incremental update optimization
+        if k > window && k - *prev_k < window && *prev_k > 0 {
+            // Incremental update: subtract old values and add new values
+            let safe_start = (*prev_k).saturating_sub(window);
+            
+            // Vectorized calculation for removing old values
+            if safe_start < start_k {
+                let old_slice = self.hlcvs.slice(s![safe_start..start_k, .., ..]);
+                for idx in 0..self.n_coins {
+                    let coin_slice = old_slice.slice(s![.., idx, ..]);
+                    let old_noisiness: f64 = coin_slice
+                        .axis_iter(Axis(0))
+                        .map(|row| (row[HIGH] - row[LOW]) / row[CLOSE])
+                        .sum();
+                    rolling_noisiness[idx] -= old_noisiness;
+                }
+            }
+            
+            // Vectorized calculation for adding new values
+            if *prev_k < k {
+                let new_slice = self.hlcvs.slice(s![*prev_k..k, .., ..]);
+                for idx in 0..self.n_coins {
+                    let coin_slice = new_slice.slice(s![.., idx, ..]);
+                    let new_noisiness: f64 = coin_slice
+                        .axis_iter(Axis(0))
+                        .map(|row| (row[HIGH] - row[LOW]) / row[CLOSE])
+                        .sum();
+                    rolling_noisiness[idx] += new_noisiness;
+                }
+            }
+        } else {
+            // Full recalculation (first time or when gap is too large)
+            // Use vectorized operations for better performance
+            let slice = self.hlcvs.slice(s![start_k..k, .., ..]);
+            for idx in 0..self.n_coins {
+                let coin_slice = slice.slice(s![.., idx, ..]);
+                rolling_noisiness[idx] = coin_slice
                     .axis_iter(Axis(0))
-                    .map(|row| (row[HIGH] - row[LOW]) / row[CLOSE])
+                    .map(|row| {
+                        let close = row[CLOSE];
+                        // Avoid division by zero
+                        if close > 0.0 {
+                            (row[HIGH] - row[LOW]) / close
+                        } else {
+                            0.0
+                        }
+                    })
                     .sum();
-                (noisiness, idx)
-            })
+            }
+        }
+        *prev_k = k;
+
+        // Only sort the candidates subset instead of all coins for better performance
+        let mut candidate_noisiness: Vec<(f64, usize)> = candidates
+            .iter()
+            .map(|&idx| (rolling_noisiness[idx], idx))
             .collect();
 
-        noisinesses.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-        noisinesses.into_iter().map(|(_, idx)| idx).collect()
+        // Use unstable sort for better performance since we don't need stable ordering
+        candidate_noisiness.sort_unstable_by(|a, b| {
+            b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal)
+        });
+        
+        candidate_noisiness.into_iter().map(|(_, idx)| idx).collect()
     }
 
     fn create_state_params(&self, k: usize, idx: usize, pside: usize) -> StateParams {
@@ -525,6 +641,7 @@ impl<'a> Backtest<'a> {
     }
 
     fn update_equities(&mut self, k: usize) {
+        profile_function!();
         // Start with the “running totals” in our Balance struct
         let mut equity_usd = self.balance.usd_total;
         let mut equity_btc = self.balance.btc_total;
@@ -629,6 +746,7 @@ impl<'a> Backtest<'a> {
     }
 
     fn check_for_fills(&mut self, k: usize) {
+        profile_function!();
         self.did_fill_long.clear();
         self.did_fill_short.clear();
         if self.trading_enabled.long {
@@ -898,6 +1016,7 @@ impl<'a> Backtest<'a> {
     }
 
     fn update_trailing_prices(&mut self, k: usize) {
+        profile_function!();
         // ----- LONG side -----
         if self.trading_enabled.long && self.any_trailing_long {
             for (&idx, _) in &self.positions.long {
@@ -1339,6 +1458,7 @@ impl<'a> Backtest<'a> {
     }
 
     fn update_open_orders_all(&mut self, k: usize) {
+        profile_function!();
         self.open_orders = OpenOrders::default();
         if self.trading_enabled.long {
             let mut active_long_indices: Vec<usize> = self.positions.long.keys().cloned().collect();
@@ -1388,6 +1508,7 @@ impl<'a> Backtest<'a> {
 
     #[inline]
     fn update_emas(&mut self, k: usize) {
+        profile_function!();
         for i in 0..self.n_coins {
             let close_price = self.hlcvs[[k, i, CLOSE]];
 
@@ -1410,6 +1531,7 @@ impl<'a> Backtest<'a> {
 /// A candle is *invalid* when `high == low == close` **and** `volume <= 0.0`
 /// (volume is -1.0 in new data, 0.0 in older back/front-filled data).
 fn find_valid_timestamp_bounds(hlcvs: &ArrayView3<f64>) -> (Vec<usize>, Vec<usize>) {
+    profile_function!();
     let n_ts = hlcvs.shape()[0];
     let n_coins = hlcvs.shape()[1];
     let mut firsts = vec![0; n_coins];
