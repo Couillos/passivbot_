@@ -18,8 +18,6 @@ use crate::utils::{
 use ndarray::{s, ArrayView1, ArrayView3, Axis};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use crate::profiler::{start_profiling, print_profiling_report};
-use crate::{profile_function, profile_block};
 
 #[derive(Clone, Default, Copy, Debug)]
 pub struct EmaAlphas {
@@ -291,11 +289,6 @@ impl<'a> Backtest<'a> {
     }
 
     pub fn run(&mut self) -> (Vec<Fill>, Equities) {
-        profile_function!();
-        
-        // Start global profiling
-        start_profiling();
-        
         let n_timesteps = self.hlcvs.shape()[0];
         for idx in 0..self.n_coins {
             self.trailing_prices
@@ -307,9 +300,7 @@ impl<'a> Backtest<'a> {
         }
 
         // --- find first & last valid candle for every coin (binary-search) ---
-        let (first_valid, last_valid) = profile_block!("find_valid_timestamp_bounds", {
-            find_valid_timestamp_bounds(&self.hlcvs)
-        });
+        let (first_valid, last_valid) = find_valid_timestamp_bounds(&self.hlcvs);
         
         for idx in 0..self.n_coins {
             self.first_valid_timestamps.insert(idx, first_valid[idx]);
@@ -319,46 +310,20 @@ impl<'a> Backtest<'a> {
             }
         }
 
-        println!("Starting main backtest loop with {} timesteps", n_timesteps);
-        
         for k in 1..(n_timesteps - 1) {
-            profile_block!("check_for_fills", {
-                self.check_for_fills(k);
-            });
-            
-            profile_block!("update_emas", {
-                self.update_emas(k);
-            });
-            
-            profile_block!("update_rounded_balance", {
-                self.update_rounded_balance(k);
-            });
-            
-            profile_block!("update_trailing_prices", {
-                self.update_trailing_prices(k);
-            });
-            
-            profile_block!("update_n_positions_and_wallet_exposure_limits", {
-                self.update_n_positions_and_wallet_exposure_limits(k);
-            });
-            
-            profile_block!("update_open_orders_all", {
-                self.update_open_orders_all(k);
-            });
-            
-            profile_block!("update_equities", {
-                self.update_equities(k);
-            });
+            self.check_for_fills(k);
+            self.update_emas(k);
+            self.update_rounded_balance(k);
+            self.update_trailing_prices(k);
+            self.update_n_positions_and_wallet_exposure_limits(k);
+            self.update_open_orders_all(k);
+            self.update_equities(k);
         }
-        
-        // Print profiling report at the end
-        print_profiling_report();
         
         (self.fills.clone(), self.equities.clone())
     }
 
     fn update_n_positions_and_wallet_exposure_limits(&mut self, k: usize) {
-        profile_function!();
         let last_ts = self.hlcvs.shape()[0] - 1;
         let eligible: Vec<usize> = (0..self.n_coins)
             .filter(|&idx| {
@@ -412,7 +377,6 @@ impl<'a> Backtest<'a> {
 
     #[inline(always)]
     fn update_rounded_balance(&mut self, k: usize) {
-        profile_function!();
         if self.balance.use_btc_collateral {
             // 1. raw, unrounded totals
             self.balance.usd_total = (self.balance.btc * self.btc_usd_prices[k]) + self.balance.usd;
@@ -438,7 +402,6 @@ impl<'a> Backtest<'a> {
     }
 
     pub fn calc_preferred_coins(&mut self, k: usize, pside: usize) -> Vec<usize> {
-        profile_function!();
         let n_positions = match pside {
             LONG => self.effective_n_positions.long,
             SHORT => self.effective_n_positions.short,
@@ -474,7 +437,8 @@ impl<'a> Backtest<'a> {
 
         let volume_indices = self.volume_indices_buffer.as_mut().unwrap();
 
-        if k > window && k - *prev_k < window {
+        // Simple incremental update (same as original but with safety check)
+        if k > window && k - *prev_k < window && *prev_k > 0 {
             let safe_start = (*prev_k).saturating_sub(window);
             for idx in 0..self.n_coins {
                 rolling_volume_sum[idx] -=
@@ -505,7 +469,6 @@ impl<'a> Backtest<'a> {
     }
 
     fn rank_by_noisiness(&mut self, k: usize, candidates: &[usize], pside: usize) -> Vec<usize> {
-        profile_function!();
         let bot_params = match pside {
             LONG => &self.bot_params_master.long,
             SHORT => &self.bot_params_master.short,
@@ -641,7 +604,6 @@ impl<'a> Backtest<'a> {
     }
 
     fn update_equities(&mut self, k: usize) {
-        profile_function!();
         // Start with the “running totals” in our Balance struct
         let mut equity_usd = self.balance.usd_total;
         let mut equity_btc = self.balance.btc_total;
@@ -746,7 +708,6 @@ impl<'a> Backtest<'a> {
     }
 
     fn check_for_fills(&mut self, k: usize) {
-        profile_function!();
         self.did_fill_long.clear();
         self.did_fill_short.clear();
         if self.trading_enabled.long {
@@ -1016,7 +977,6 @@ impl<'a> Backtest<'a> {
     }
 
     fn update_trailing_prices(&mut self, k: usize) {
-        profile_function!();
         // ----- LONG side -----
         if self.trading_enabled.long && self.any_trailing_long {
             for (&idx, _) in &self.positions.long {
@@ -1458,7 +1418,6 @@ impl<'a> Backtest<'a> {
     }
 
     fn update_open_orders_all(&mut self, k: usize) {
-        profile_function!();
         self.open_orders = OpenOrders::default();
         if self.trading_enabled.long {
             let mut active_long_indices: Vec<usize> = self.positions.long.keys().cloned().collect();
@@ -1508,7 +1467,6 @@ impl<'a> Backtest<'a> {
 
     #[inline]
     fn update_emas(&mut self, k: usize) {
-        profile_function!();
         for i in 0..self.n_coins {
             let close_price = self.hlcvs[[k, i, CLOSE]];
 
@@ -1531,7 +1489,6 @@ impl<'a> Backtest<'a> {
 /// A candle is *invalid* when `high == low == close` **and** `volume <= 0.0`
 /// (volume is -1.0 in new data, 0.0 in older back/front-filled data).
 fn find_valid_timestamp_bounds(hlcvs: &ArrayView3<f64>) -> (Vec<usize>, Vec<usize>) {
-    profile_function!();
     let n_ts = hlcvs.shape()[0];
     let n_coins = hlcvs.shape()[1];
     let mut firsts = vec![0; n_coins];
