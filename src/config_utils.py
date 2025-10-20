@@ -1089,6 +1089,12 @@ def get_template_config(passivbot_mode="v7"):
         },
         "bot": {
             "long": {
+                "adaptive_ema_span_minutes": 60.0,
+                "adaptive_sigmoid_offset": 0.12,
+                "adaptive_sigmoid_steepness": 30.0,
+                "adaptive_smoothing_enabled": True,
+                "adaptive_smoothing_span_minutes": 10.0,
+                "adaptive_trailing_enabled": False,
                 "close_grid_markup_end": 0.0089,
                 "close_grid_markup_start": 0.0344,
                 "close_grid_qty_pct": 0.125,
@@ -1121,6 +1127,12 @@ def get_template_config(passivbot_mode="v7"):
                 "unstuck_threshold": 0.916,
             },
             "short": {
+                "adaptive_ema_span_minutes": 60.0,
+                "adaptive_sigmoid_offset": 0.12,
+                "adaptive_sigmoid_steepness": 30.0,
+                "adaptive_smoothing_enabled": True,
+                "adaptive_smoothing_span_minutes": 10.0,
+                "adaptive_trailing_enabled": False,
                 "close_grid_markup_end": 0.0089,
                 "close_grid_markup_start": 0.0344,
                 "close_grid_qty_pct": 0.125,
@@ -1180,6 +1192,10 @@ def get_template_config(passivbot_mode="v7"):
         },
         "optimize": {
             "bounds": {
+                "long_adaptive_ema_span_minutes": [30.0, 240.0],
+                "long_adaptive_sigmoid_offset": [0.05, 0.20],
+                "long_adaptive_sigmoid_steepness": [15.0, 50.0],
+                "long_adaptive_smoothing_span_minutes": [5.0, 30.0],
                 "long_close_grid_markup_end": [0.001, 0.03],
                 "long_close_grid_markup_start": [0.001, 0.03],
                 "long_close_grid_qty_pct": [0.05, 1.0],
@@ -1209,6 +1225,10 @@ def get_template_config(passivbot_mode="v7"):
                 "long_unstuck_ema_dist": [-0.1, 0.01],
                 "long_unstuck_loss_allowance_pct": [0.001, 0.05],
                 "long_unstuck_threshold": [0.4, 0.95],
+                "short_adaptive_ema_span_minutes": [30.0, 240.0],
+                "short_adaptive_sigmoid_offset": [0.05, 0.20],
+                "short_adaptive_sigmoid_steepness": [15.0, 50.0],
+                "short_adaptive_smoothing_span_minutes": [5.0, 30.0],
                 "short_close_grid_markup_end": [0.001, 0.03],
                 "short_close_grid_markup_start": [0.001, 0.03],
                 "short_close_grid_qty_pct": [0.05, 1.0],

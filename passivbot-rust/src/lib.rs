@@ -1,3 +1,4 @@
+mod adaptive_trailing;
 mod analysis;
 mod backtest;
 mod closes;

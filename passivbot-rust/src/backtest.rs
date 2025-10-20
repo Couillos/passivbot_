@@ -1,3 +1,4 @@
+use crate::adaptive_trailing::AdaptiveTrailingState;
 use crate::closes::{
     calc_closes_long, calc_closes_short, calc_next_close_long, calc_next_close_short,
 };
@@ -232,6 +233,8 @@ pub struct Backtest<'a> {
     n_eligible_long: usize,
     n_eligible_short: usize,
     // removed rolling_volume_sum & buffer — replaced by per-coin EMAs in `emas`
+    adaptive_trailing_states_long: Vec<AdaptiveTrailingState>,
+    adaptive_trailing_states_short: Vec<AdaptiveTrailingState>,
 }
 
 impl<'a> Backtest<'a> {
@@ -409,6 +412,17 @@ impl<'a> Backtest<'a> {
         let any_trailing_long = trailing_enabled.iter().any(|te| te.long);
         let any_trailing_short = trailing_enabled.iter().any(|te| te.short);
 
+        // Initialize adaptive trailing states for each coin
+        let adaptive_trailing_states_long: Vec<AdaptiveTrailingState> = bot_params
+            .iter()
+            .map(|bp| AdaptiveTrailingState::new(bp.long.adaptive_ema_span_minutes))
+            .collect();
+        
+        let adaptive_trailing_states_short: Vec<AdaptiveTrailingState> = bot_params
+            .iter()
+            .map(|bp| AdaptiveTrailingState::new(bp.short.adaptive_ema_span_minutes))
+            .collect();
+
         Backtest {
             hlcvs,
             btc_usd_prices,
@@ -458,6 +472,8 @@ impl<'a> Backtest<'a> {
             n_eligible_long,
             n_eligible_short,
             // EMAs already initialized in `emas`; no rolling buffers needed
+            adaptive_trailing_states_long,
+            adaptive_trailing_states_short,
         }
     }
 
@@ -524,6 +540,7 @@ impl<'a> Backtest<'a> {
             }
             self.check_for_fills(k);
             self.update_emas(k);
+            self.update_adaptive_trailing_ratios(k);
             self.update_rounded_balance(k);
             self.update_trailing_prices(k);
             let current_ts = self.first_timestamp_ms + (k as u64) * 60_000u64;
@@ -1822,6 +1839,98 @@ impl<'a> Backtest<'a> {
                 &mut emas.log_range_short_num,
                 &mut emas.log_range_short_den,
             );
+        }
+    }
+
+    #[inline]
+    fn update_adaptive_trailing_ratios(&mut self, k: usize) {
+        use crate::adaptive_trailing::calculate_adaptive_trailing_ratio;
+        
+        for i in 0..self.n_coins {
+            // Skip if coin not valid at this timestep
+            if !self.coin_is_valid_at(i, k) {
+                continue;
+            }
+
+            let close_price = self.hlcvs[[k, i, CLOSE]];
+            if !close_price.is_finite() || close_price <= 0.0 {
+                continue;
+            }
+
+            // Update long side if adaptive trailing enabled
+            if self.bot_params[i].long.adaptive_trailing_enabled {
+                let base_ratio = self.bot_params_original[i].long.entry_trailing_grid_ratio;
+                let adaptive_ratio = calculate_adaptive_trailing_ratio(
+                    close_price,
+                    &mut self.adaptive_trailing_states_long[i],
+                    self.bot_params[i].long.adaptive_sigmoid_steepness,
+                    self.bot_params[i].long.adaptive_sigmoid_offset,
+                    self.bot_params[i].long.adaptive_smoothing_enabled,
+                    self.bot_params[i].long.adaptive_smoothing_span_minutes,
+                );
+                
+                // Apply adaptive modulation only if it's more aggressive than base_ratio
+                // adaptive_ratio ranges from 0 (grid mode) to 1 (trailing mode)
+                let effective_ratio = if base_ratio.abs() >= 1.0 {
+                    // If base_ratio is >=1 or <=-1, keep full trailing/grid mode
+                    base_ratio
+                } else if base_ratio >= 0.0 {
+                    // Positive base_ratio: trailing first
+                    // Use adaptive only if it's MORE trailing than base (adaptive_ratio > base_ratio)
+                    if adaptive_ratio > base_ratio {
+                        adaptive_ratio
+                    } else {
+                        base_ratio
+                    }
+                } else {
+                    // Negative base_ratio: grid first
+                    // Use adaptive only if it's MORE grid than base (adaptive_ratio < base_ratio)
+                    // Since adaptive_ratio is [0,1] and base_ratio is negative, we need to compare with -adaptive_ratio
+                    let adaptive_as_negative = -adaptive_ratio;
+                    if adaptive_as_negative < base_ratio {
+                        adaptive_as_negative
+                    } else {
+                        base_ratio
+                    }
+                };
+                
+                self.bot_params[i].long.entry_trailing_grid_ratio = effective_ratio;
+            }
+
+            // Update short side if adaptive trailing enabled
+            if self.bot_params[i].short.adaptive_trailing_enabled {
+                let base_ratio = self.bot_params_original[i].short.entry_trailing_grid_ratio;
+                let adaptive_ratio = calculate_adaptive_trailing_ratio(
+                    close_price,
+                    &mut self.adaptive_trailing_states_short[i],
+                    self.bot_params[i].short.adaptive_sigmoid_steepness,
+                    self.bot_params[i].short.adaptive_sigmoid_offset,
+                    self.bot_params[i].short.adaptive_smoothing_enabled,
+                    self.bot_params[i].short.adaptive_smoothing_span_minutes,
+                );
+                
+                // Apply adaptive modulation only if it's more aggressive than base_ratio
+                let effective_ratio = if base_ratio.abs() >= 1.0 {
+                    base_ratio
+                } else if base_ratio >= 0.0 {
+                    // Positive: use adaptive only if it's MORE trailing than base
+                    if adaptive_ratio > base_ratio {
+                        adaptive_ratio
+                    } else {
+                        base_ratio
+                    }
+                } else {
+                    // Negative: use adaptive only if it's MORE grid than base
+                    let adaptive_as_negative = -adaptive_ratio;
+                    if adaptive_as_negative < base_ratio {
+                        adaptive_as_negative
+                    } else {
+                        base_ratio
+                    }
+                };
+                
+                self.bot_params[i].short.entry_trailing_grid_ratio = effective_ratio;
+            }
         }
     }
 }

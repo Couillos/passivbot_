@@ -96,6 +96,12 @@ pub struct BotParamsPair {
 
 #[derive(Clone, Default, Debug)]
 pub struct BotParams {
+    pub adaptive_ema_span_minutes: f64,
+    pub adaptive_sigmoid_offset: f64,
+    pub adaptive_sigmoid_steepness: f64,
+    pub adaptive_smoothing_enabled: bool,
+    pub adaptive_smoothing_span_minutes: f64,
+    pub adaptive_trailing_enabled: bool,
     pub close_grid_markup_end: f64,
     pub close_grid_markup_start: f64,
     pub close_grid_qty_pct: f64,

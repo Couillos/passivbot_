@@ -257,6 +257,12 @@ fn extract_grid_spacing_we_weight(dict: &PyDict) -> PyResult<f64> {
 
 fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
     Ok(BotParams {
+        adaptive_ema_span_minutes: extract_value(dict, "adaptive_ema_span_minutes")?,
+        adaptive_sigmoid_offset: extract_value(dict, "adaptive_sigmoid_offset")?,
+        adaptive_sigmoid_steepness: extract_value(dict, "adaptive_sigmoid_steepness")?,
+        adaptive_smoothing_enabled: extract_bool_value(dict, "adaptive_smoothing_enabled")?,
+        adaptive_smoothing_span_minutes: extract_value(dict, "adaptive_smoothing_span_minutes")?,
+        adaptive_trailing_enabled: extract_bool_value(dict, "adaptive_trailing_enabled")?,
         close_grid_markup_end: extract_value(dict, "close_grid_markup_end")?,
         close_grid_markup_start: extract_value(dict, "close_grid_markup_start")?,
         close_grid_qty_pct: extract_value(dict, "close_grid_qty_pct")?,
