@@ -127,6 +127,9 @@ pub struct BotParams {
     pub unstuck_ema_dist: f64,
     pub unstuck_loss_allowance_pct: f64,
     pub unstuck_threshold: f64,
+    pub hedge_sma_len: usize,
+    pub hedge_fall_pct: f64,
+    pub hedge_stop_loss_pct: f64,
 }
 
 #[derive(Debug)]
@@ -258,6 +261,25 @@ pub struct Fill {
     pub position_size: f64,
     pub position_price: f64,
     pub order_type: OrderType,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HedgePosition {
+    pub size: f64,
+    pub entry_price: f64,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct HedgeFill {
+    pub index: usize,
+    pub coin: String,
+    pub pnl: f64,
+    pub fee_paid: f64,
+    pub fill_qty: f64,
+    pub fill_price: f64,
+    pub position_size: f64,
+    pub is_entry: bool, // true for entry, false for exit
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -35,6 +35,8 @@ pub fn run_backtest(
     Py<PyArray2<PyObject>>,
     Py<PyArray1<f64>>,
     Py<PyArray1<f64>>,
+    Py<PyArray2<PyObject>>, // hedge_fills
+    Py<PyArray1<f64>>,      // hedge_equity
     Py<PyDict>,
     Py<PyDict>,
 )> {
@@ -123,7 +125,7 @@ pub fn run_backtest(
 
     // Run the backtest and process results
     Python::with_gil(|py| {
-        let (fills, equities) = backtest.run();
+        let (fills, equities, hedge_fills, hedge_equity) = backtest.run();
         let (analysis_usd, analysis_btc) =
             analyze_backtest_pair(&fills, &equities, backtest.balance.use_btc_collateral);
 
@@ -147,16 +149,33 @@ pub fn run_backtest(
             py_fills[(i, 12)] = fill.order_type.to_string().into_py(py);
         }
 
+        // Process hedge fills
+        let mut py_hedge_fills = Array2::from_elem((hedge_fills.len(), 7), py.None());
+        for (i, hf) in hedge_fills.iter().enumerate() {
+            py_hedge_fills[(i, 0)] = hf.index.into_py(py);
+            py_hedge_fills[(i, 1)] = <String as Clone>::clone(&hf.coin).into_py(py);
+            py_hedge_fills[(i, 2)] = hf.pnl.into_py(py);
+            py_hedge_fills[(i, 3)] = hf.fee_paid.into_py(py);
+            py_hedge_fills[(i, 4)] = hf.fill_qty.into_py(py);
+            py_hedge_fills[(i, 5)] = hf.fill_price.into_py(py);
+            py_hedge_fills[(i, 6)] = hf.is_entry.into_py(py);
+        }
+
         let py_equities_usd = Array1::from_vec(equities.usd)
             .into_pyarray_bound(py)
             .unbind();
         let py_equities_btc = Array1::from_vec(equities.btc)
             .into_pyarray_bound(py)
             .unbind();
+        let py_hedge_equity = Array1::from_vec(hedge_equity)
+            .into_pyarray_bound(py)
+            .unbind();
         Ok((
             py_fills.into_pyarray_bound(py).unbind(),
             py_equities_usd,
             py_equities_btc,
+            py_hedge_fills.into_pyarray_bound(py).unbind(),
+            py_hedge_equity,
             py_analysis_usd.into(),
             py_analysis_btc.into(),
         ))
@@ -297,6 +316,12 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
         unstuck_ema_dist: extract_value(dict, "unstuck_ema_dist")?,
         unstuck_loss_allowance_pct: extract_value(dict, "unstuck_loss_allowance_pct")?,
         unstuck_threshold: extract_value(dict, "unstuck_threshold")?,
+        hedge_sma_len: {
+            let val: f64 = extract_value(dict, "hedge_sma_len").unwrap_or(10.0);
+            val.round() as usize
+        },
+        hedge_fall_pct: extract_value(dict, "hedge_fall_pct").unwrap_or(0.20),
+        hedge_stop_loss_pct: extract_value(dict, "hedge_stop_loss_pct").unwrap_or(0.02),
     })
 }
 

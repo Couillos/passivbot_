@@ -1119,6 +1119,9 @@ def get_template_config(passivbot_mode="v7"):
                 "unstuck_ema_dist": 0.0,
                 "unstuck_loss_allowance_pct": 0.03,
                 "unstuck_threshold": 0.916,
+                "hedge_sma_len": 10,
+                "hedge_fall_pct": 0.2,
+                "hedge_stop_loss_pct": 0.02,
             },
             "short": {
                 "close_grid_markup_end": 0.0089,

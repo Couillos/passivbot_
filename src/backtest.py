@@ -115,7 +115,7 @@ def calculate_flat_btc_balance_minutes(fills):
     return 0.0
 
 
-def process_forager_fills(fills, coins, hlcvs, equities, equities_btc):
+def process_forager_fills(fills, coins, hlcvs, equities, equities_btc, hedge_equity=None):
     fdf = pd.DataFrame(
         fills,
         columns=[
@@ -153,11 +153,16 @@ def process_forager_fills(fills, coins, hlcvs, equities, equities_btc):
     bbdf = fdf.groupby((fdf.minute // div_by) * div_by).balance_btc.last()
     edf = pd.Series(equities).iloc[::div_by]
     ebdf = pd.Series(equities_btc).iloc[::div_by]
+    
+    # Add hedge equity if available
+    df_dict = {"balance": bdf, "equity": edf, "balance_btc": bbdf, "equity_btc": ebdf}
+    if hedge_equity is not None and len(hedge_equity) > 0:
+        hedf = pd.Series(hedge_equity).iloc[::div_by]
+        df_dict["hedge_equity"] = hedf
+    
     nidx = np.arange(min(bdf.index[0], edf.index[0]), max(bdf.index[-1], edf.index[-1]), div_by)
     bal_eq = (
-        pd.DataFrame(
-            {"balance": bdf, "equity": edf, "balance_btc": bbdf, "equity_btc": ebdf}, index=nidx
-        )
+        pd.DataFrame(df_dict, index=nidx)
         .astype(float)
         .ffill()
         .bfill()
@@ -464,6 +469,78 @@ def prep_backtest_args(config, mss, exchange, exchange_params=None, backtest_par
 
 def expand_analysis(analysis_usd, analysis_btc, fills, config):
     analysis_usd["flat_btc_balance_hours"] = calculate_flat_btc_balance_minutes(fills) / 60.0
+    # Calculate grid_size inspired by grid_size.py: call calc_entries_long_py with
+    # bot.long params. Assuming pb_last = True (entry_grid_spacing_we_weight).
+    bot_long = config.get("bot", {}).get("long", {}) if isinstance(config, dict) else {}
+
+    # Exchange/exchange-params-like defaults (no per-coin mss here)
+    qty_step = 0.001
+    price_step = 0.001
+    min_qty = 0.1
+    min_cost = 5.0
+    c_mult = 1.0
+
+    # Bot params (prefer explicit bot.long settings)
+    entry_grid_double_down_factor = float(bot_long.get("entry_grid_double_down_factor", 1.0))
+    entry_grid_spacing_we_weight = float(bot_long.get("entry_grid_spacing_we_weight", 0.0))
+    entry_grid_spacing_pct = float(bot_long.get("entry_grid_spacing_pct", 0.01))
+    entry_initial_ema_dist = float(bot_long.get("entry_initial_ema_dist", 0.0))
+    entry_initial_qty_pct = float(bot_long.get("entry_initial_qty_pct", 0.01))
+    entry_trailing_double_down_factor = float(bot_long.get("entry_trailing_double_down_factor", 1.0))
+    entry_trailing_grid_ratio = float(bot_long.get("entry_trailing_grid_ratio", 0.0))
+    entry_trailing_retracement_pct = float(bot_long.get("entry_trailing_retracement_pct", 0.0))
+    entry_trailing_threshold_pct = float(bot_long.get("entry_trailing_threshold_pct", 0.0))
+    wallet_exposure_limit = float(bot_long.get("wallet_exposure_limit", bot_long.get("total_wallet_exposure_limit", -1.0)))
+
+    # State and position fallbacks
+    balance = float(config.get("backtest", {}).get("starting_balance", 1000.0))
+    position_size = 0.0
+    position_price = 1000.0
+    min_since_open = 0.1
+    max_since_min = 0.1
+    max_since_open = 0.1
+    min_since_max = 0.1
+    ema_bands_lower = 1.0
+    order_book_bid = position_price
+
+    # Call into Rust-exposed Python function like grid_size.py does (pb_last = True)
+    entries = pbr.calc_entries_long_py(
+        qty_step=qty_step,
+        price_step=price_step,
+        min_qty=min_qty,
+        min_cost=min_cost,
+        c_mult=c_mult,
+        entry_grid_double_down_factor=entry_grid_double_down_factor,
+        entry_grid_spacing_we_weight=entry_grid_spacing_we_weight,
+        entry_grid_spacing_log_weight=0.0,
+        grid_log_range=0.0,
+        entry_grid_spacing_pct=entry_grid_spacing_pct,
+        entry_initial_ema_dist=entry_initial_ema_dist,
+        entry_initial_qty_pct=entry_initial_qty_pct,
+        entry_trailing_double_down_factor=entry_trailing_double_down_factor,
+        entry_trailing_grid_ratio=entry_trailing_grid_ratio,
+        entry_trailing_retracement_pct=entry_trailing_retracement_pct,
+        entry_trailing_threshold_pct=entry_trailing_threshold_pct,
+        wallet_exposure_limit=wallet_exposure_limit,
+        balance=balance,
+        position_size=position_size,
+        position_price=position_price,
+        min_since_open=min_since_open,
+        max_since_min=max_since_min,
+        max_since_open=max_since_open,
+        min_since_max=min_since_max,
+        ema_bands_lower=ema_bands_lower,
+        order_book_bid=order_book_bid,
+    )
+
+    # entries is a list of tuples (qty, price, order_type_id)
+    if entries and len(entries) >= 2:
+        # compute percentage like grid_size.py
+        grid_size = (1 - (entries[-1][1] / entries[0][1])) * 100
+    else:
+        grid_size = 0.0
+
+    analysis_usd["grid_size"] = grid_size
     keys = ["adg", "adg_w", "mdg", "mdg_w", "gain"]
     for pside in ["long", "short"]:
         twel = float(require_config_value(config, f"bot.{pside}.total_wallet_exposure_limit"))
@@ -551,7 +628,15 @@ def run_backtest(hlcvs, mss, config: dict, exchange: str, btc_usd_prices, timest
     with create_shared_memory_file(hlcvs) as shared_memory_file, create_shared_memory_file(
         btc_usd_prices
     ) as btc_usd_shared_memory_file:
-        fills, equities_usd, equities_btc, analysis_usd, analysis_btc = pbr.run_backtest(
+        (
+            fills,
+            equities_usd,
+            equities_btc,
+            hedge_fills,
+            hedge_equity,
+            analysis_usd,
+            analysis_btc,
+        ) = pbr.run_backtest(
             shared_memory_file,
             hlcvs.shape,
             hlcvs.dtype.str,
@@ -567,6 +652,8 @@ def run_backtest(hlcvs, mss, config: dict, exchange: str, btc_usd_prices, timest
         fills,
         equities_usd,
         equities_btc,
+        hedge_fills,
+        hedge_equity,
         expand_analysis(analysis_usd, analysis_btc, fills, config),
     )
 
@@ -581,6 +668,8 @@ def post_process(
     analysis,
     results_path,
     exchange,
+    hedge_fills=None,
+    hedge_equity=None,
 ):
     sts = utc_ms()
     equities = pd.Series(equities)
@@ -591,6 +680,7 @@ def post_process(
         hlcvs,
         equities,
         equities_btc,
+        hedge_equity,
     )
     for k in analysis_py:
         if k not in analysis:
@@ -605,6 +695,16 @@ def post_process(
     dump_config(config, f"{results_path}config.json")
     fdf.to_csv(f"{results_path}fills.csv")
     bal_eq.to_csv(oj(results_path, "balance_and_equity.csv"))
+    
+    # Save hedge fills if available
+    if hedge_fills is not None and len(hedge_fills) > 0:
+        hedge_df = pd.DataFrame(
+            hedge_fills,
+            columns=["minute", "coin", "pnl", "fee_paid", "qty", "price", "is_entry"]
+        )
+        hedge_df.to_csv(f"{results_path}hedge_fills.csv")
+        logging.info(f"Saved {len(hedge_fills)} hedge fills to hedge_fills.csv")
+    
     plot_forager(
         results_path,
         config,
@@ -612,6 +712,8 @@ def post_process(
         fdf,
         bal_eq,
         hlcvs,
+        hedge_fills,
+        hedge_equity,
     )
 
 
@@ -622,21 +724,207 @@ def plot_forager(
     fdf: pd.DataFrame,
     bal_eq,
     hlcvs,
+    hedge_fills=None,
+    hedge_equity=None,
 ):
     plots_dir = make_get_filepath(oj(results_path, "fills_plots", ""))
+    analysis = config.get("analysis", {})
+    
+    # Dark theme balance and equity plot (linear scale)
     plt.clf()
-    bal_eq[["balance", "equity"]].plot(logy=False)
+    plt.style.use("dark_background")
+    plt.rcParams['figure.facecolor'] = '#121212'
+    plt.rcParams['axes.facecolor'] = '#121212'
+    plt.rcParams['grid.color'] = '#444444'
+    plt.rcParams['text.color'] = 'white'
+    plt.rcParams['axes.labelcolor'] = 'white'
+    plt.rcParams['xtick.color'] = 'white'
+    plt.rcParams['ytick.color'] = 'white'
+    
+    # Check if we need subplots for hedge equity (if hedge_equity is not None and has non-zero values)
+    has_hedge_data = (
+        hedge_equity is not None 
+        and len(hedge_equity) > 0 
+        and max(abs(x) for x in hedge_equity) > 0.001  # Has meaningful hedge activity
+    )
+    
+    if has_hedge_data:
+        fig = plt.figure(figsize=(29, 24))
+        ax = plt.subplot(2, 1, 1)
+    else:
+        fig = plt.figure(figsize=(29, 18))
+        ax = plt.gca()
+    
+    ax.plot(bal_eq.index, bal_eq["balance"], label="Balance")
+    ax.plot(bal_eq.index, bal_eq["equity"], label="Equity")
+    
+    ax.grid()
+    ax.legend()
+    
+    metrics = [
+        ("adg", analysis.get("adg")),
+        ("mdg", analysis.get("mdg")),
+        ("gain", analysis.get("gain")),
+        ("grid_size", analysis.get("grid_size")),
+        ("drawdown_worst", analysis.get("drawdown_worst")),
+        ("drawdown_worst_mean_1pct", analysis.get("drawdown_worst_mean_1pct")),
+        ("loss_profit_ratio", analysis.get("loss_profit_ratio")),
+        ("sortino_ratio", analysis.get("sortino_ratio")),
+        ("calmar_ratio", analysis.get("calmar_ratio")),
+        ("sterling_ratio", analysis.get("sterling_ratio")),
+        ("sharpe_ratio", analysis.get("sharpe_ratio")),
+        ("omega_ratio", analysis.get("omega_ratio")),
+        ("equity_balance_diff_neg_max", analysis.get("equity_balance_diff_neg_max")),
+        ("equity_balance_diff_neg_mean", analysis.get("equity_balance_diff_neg_mean")),
+        ("position_held_hours_max", analysis.get("position_held_hours_max")),
+        ("position_held_hours_mean", analysis.get("position_held_hours_mean")),
+        ("position_held_hours_median", analysis.get("position_held_hours_median")),
+        ("position_unchanged_hours_max", analysis.get("position_unchanged_hours_max")),
+        ("positions_held_per_day", analysis.get("positions_held_per_day")),
+    ]
+    metrics_text = "\n".join([f"{k}: {v:.6g}" if v is not None else f"{k}: -" for k, v in metrics])
+    ax.text(0.006, 0.9914, metrics_text, fontsize=18, color="white", va="top", ha="left", 
+            family="monospace", transform=ax.transAxes, 
+            bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
+    
+    # Add hedge equity subplot if hedge_equity is available
+    if has_hedge_data and hedge_equity is not None:
+        # Create second subplot for total hedge equity
+        ax2 = plt.subplot(2, 1, 2)
+        
+        # Convert to pandas Series for easier plotting
+        hedge_eq_series = pd.Series(hedge_equity)
+        
+        # Plot hedge equity
+        ax2.plot(
+            hedge_eq_series.index,
+            hedge_eq_series.values,
+            label="Hedge Equity",
+            linewidth=2,
+            color="#00ff88",
+            alpha=0.9,
+        )
+        
+        ax2.set_xlabel("Time (minutes)", color="white", fontsize=16)
+        ax2.set_ylabel("Hedge Equity (USD)", color="white", fontsize=16)
+        ax2.set_title("Total Hedge Equity", color="white", fontsize=20)
+        ax2.grid(True, alpha=0.3, color="#444444")
+        ax2.axhline(y=0, color="gray", linestyle="--", linewidth=1, alpha=0.5)
+        
+        # Add legend
+        ax2.legend(loc="best", fontsize=12, framealpha=0.8)
+        
+        # Add some stats
+        final_hedge_pnl = hedge_eq_series.iloc[-1] if len(hedge_eq_series) > 0 else 0
+        max_hedge_pnl = hedge_eq_series.max() if len(hedge_eq_series) > 0 else 0
+        min_hedge_pnl = hedge_eq_series.min() if len(hedge_eq_series) > 0 else 0
+        
+        stats_text = f"Final: {final_hedge_pnl:.2f}\nMax: {max_hedge_pnl:.2f}\nMin: {min_hedge_pnl:.2f}"
+        ax2.text(0.02, 0.98, stats_text, fontsize=14, color="white", va="top", ha="left",
+                family="monospace", transform=ax2.transAxes,
+                bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
+        
+        plt.tight_layout()
+    
     plt.savefig(oj(results_path, "balance_and_equity.png"))
+    plt.close()
+    
+    # Dark theme balance and equity plot (log scale)
     plt.clf()
-    bal_eq[["balance", "equity"]].plot(logy=True)
+    plt.style.use("dark_background")
+    plt.rcParams['figure.facecolor'] = '#121212'
+    plt.rcParams['axes.facecolor'] = '#121212'
+    plt.rcParams['grid.color'] = '#444444'
+    plt.rcParams['text.color'] = 'white'
+    plt.rcParams['axes.labelcolor'] = 'white'
+    plt.rcParams['xtick.color'] = 'white'
+    plt.rcParams['ytick.color'] = 'white'
+    
+    plt.figure(figsize=(29, 18))
+    ax = plt.gca()
+    
+    plt.plot(bal_eq.index, bal_eq["balance"], label="Balance")
+    plt.plot(bal_eq.index, bal_eq["equity"], label="Equity")
+    plt.yscale('log')
+    
+    plt.grid()
+    plt.legend()
+    
+    ax.text(0.006, 0.9914, metrics_text, fontsize=18, color="white", va="top", ha="left", 
+            family="monospace", transform=ax.transAxes, 
+            bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
+    
     plt.savefig(oj(results_path, "balance_and_equity_logy.png"))
-    plt.clf()
+    
+    # BTC collateral plots with dark theme
     if bool(require_config_value(config, "backtest.use_btc_collateral")):
         plt.clf()
-        bal_eq[["balance_btc", "equity_btc"]].plot(logy=False)
+        plt.style.use("dark_background")
+        plt.rcParams['figure.facecolor'] = '#121212'
+        plt.rcParams['axes.facecolor'] = '#121212'
+        plt.rcParams['grid.color'] = '#444444'
+        plt.rcParams['text.color'] = 'white'
+        plt.rcParams['axes.labelcolor'] = 'white'
+        plt.rcParams['xtick.color'] = 'white'
+        plt.rcParams['ytick.color'] = 'white'
+        
+        plt.figure(figsize=(29, 18))
+        ax = plt.gca()
+        
+        plt.plot(bal_eq.index, bal_eq["balance_btc"], label="Balance BTC")
+        plt.plot(bal_eq.index, bal_eq["equity_btc"], label="Equity BTC")
+        
+        plt.grid()
+        plt.legend()
+        
+        # Use BTC-specific metrics if available
+        btc_metrics = [
+            ("btc_adg", analysis.get("btc_adg")),
+            ("btc_adg_w", analysis.get("btc_adg_w")),
+            ("btc_mdg", analysis.get("btc_mdg")),
+            ("btc_mdg_w", analysis.get("btc_mdg_w")),
+            ("btc_gain", analysis.get("btc_gain")),
+            ("grid_size", analysis.get("minimum_long_grid_size")),
+            ("btc_drawdown_worst", analysis.get("btc_drawdown_worst")),
+            ("btc_drawdown_worst_mean_1pct", analysis.get("btc_drawdown_worst_mean_1pct")),
+            ("loss_profit_ratio", analysis.get("loss_profit_ratio")),
+            ("btc_sortino_ratio", analysis.get("btc_sortino_ratio")),
+            ("btc_calmar_ratio", analysis.get("btc_calmar_ratio")),
+            ("btc_sterling_ratio", analysis.get("btc_sterling_ratio")),
+            ("btc_sharpe_ratio", analysis.get("btc_sharpe_ratio")),
+            ("btc_omega_ratio", analysis.get("btc_omega_ratio")),
+        ]
+        btc_metrics_text = "\n".join([f"{k}: {v:.6g}" if v is not None else f"{k}: -" for k, v in btc_metrics])
+        ax.text(0.006, 0.9914, btc_metrics_text, fontsize=18, color="white", va="top", ha="left", 
+                family="monospace", transform=ax.transAxes, 
+                bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
+        
         plt.savefig(oj(results_path, "balance_and_equity_btc.png"))
+        
         plt.clf()
-        bal_eq[["balance_btc", "equity_btc"]].plot(logy=True)
+        plt.style.use("dark_background")
+        plt.rcParams['figure.facecolor'] = '#121212'
+        plt.rcParams['axes.facecolor'] = '#121212'
+        plt.rcParams['grid.color'] = '#444444'
+        plt.rcParams['text.color'] = 'white'
+        plt.rcParams['axes.labelcolor'] = 'white'
+        plt.rcParams['xtick.color'] = 'white'
+        plt.rcParams['ytick.color'] = 'white'
+        
+        plt.figure(figsize=(29, 18))
+        ax = plt.gca()
+        
+        plt.plot(bal_eq.index, bal_eq["balance_btc"], label="Balance BTC")
+        plt.plot(bal_eq.index, bal_eq["equity_btc"], label="Equity BTC")
+        plt.yscale('log')
+        
+        plt.grid()
+        plt.legend()
+        
+        ax.text(0.006, 0.9914, btc_metrics_text, fontsize=18, color="white", va="top", ha="left", 
+                family="monospace", transform=ax.transAxes, 
+                bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
+        
         plt.savefig(oj(results_path, "balance_and_equity_btc_logy.png"))
 
     if not config["disable_plotting"]:
@@ -709,7 +997,7 @@ async def main():
         config["backtest"]["coins"][exchange] = coins
         config["backtest"]["cache_dir"][exchange] = str(cache_dir)
 
-        fills, equities, equities_btc, analysis = run_backtest(
+        fills, equities, equities_btc, hedge_fills, hedge_equity, analysis = run_backtest(
             hlcvs, mss, config, exchange, btc_usd_prices, timestamps
         )
         post_process(
@@ -722,6 +1010,8 @@ async def main():
             analysis,
             results_path,
             exchange,
+            hedge_fills,
+            hedge_equity,
         )
     else:
         print("combined false")
@@ -735,7 +1025,7 @@ async def main():
             ]
             configs[exchange]["backtest"]["coins"][exchange] = coins
             configs[exchange]["backtest"]["cache_dir"][exchange] = str(cache_dir)
-            fills, equities, equities_btc, analysis = run_backtest(
+            fills, equities, equities_btc, hedge_fills, hedge_equity, analysis = run_backtest(
                 hlcvs, mss, configs[exchange], exchange, btc_usd_prices, timestamps
             )
             post_process(
@@ -748,6 +1038,8 @@ async def main():
                 analysis,
                 results_path,
                 exchange,
+                hedge_fills,
+                hedge_equity,
             )
 
 
