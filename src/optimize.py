@@ -763,7 +763,15 @@ class Evaluator:
                 exchange_params=self.exchange_params[exchange],
                 backtest_params=self.backtest_params[exchange],
             )
-            fills, equities_usd, equities_btc, analysis_usd, analysis_btc = pbr.run_backtest(
+            (
+                fills,
+                equities_usd,
+                equities_btc,
+                hedge_fills,
+                hedge_equity,
+                analysis_usd,
+                analysis_btc,
+            ) = pbr.run_backtest(
                 self.shared_memory_files[exchange],
                 self.hlcvs_shapes[exchange],
                 self.hlcvs_dtypes[exchange].str,

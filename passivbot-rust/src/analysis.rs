@@ -1,8 +1,8 @@
-use crate::types::{Analysis, Equities, Fill};
+use crate::types::{Analysis, Equities, Fill, HedgeFill};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
+fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>, hedge_fills: &[HedgeFill]) -> Analysis {
     if fills.len() <= 1 {
         return Analysis::default();
     }
@@ -182,9 +182,11 @@ fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
     // Calculate equity-balance differences
     let mut bal_eq = Vec::with_capacity(equities.len());
     let mut fill_iter = fills.iter().peekable();
+    let mut hedge_fill_iter = hedge_fills.iter().peekable();
     let mut last_balance = fills[0].balance_usd_total;
 
     for (i, &equity) in equities.iter().enumerate() {
+        // Update balance from regular fills
         while let Some(fill) = fill_iter.peek() {
             if fill.index <= i {
                 last_balance = fill.balance_usd_total;
@@ -193,6 +195,17 @@ fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
                 break;
             }
         }
+        
+        // Update balance from hedge fills
+        while let Some(hedge_fill) = hedge_fill_iter.peek() {
+            if hedge_fill.index <= i {
+                last_balance = hedge_fill.balance_usd_total;
+                hedge_fill_iter.next();
+            } else {
+                break;
+            }
+        }
+        
         bal_eq.push((last_balance, equity));
     }
 
@@ -223,7 +236,7 @@ fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
         0.0
     };
 
-    // Calculate profit factor
+    // Calculate profit factor (including hedge PnL)
     let (total_profit, total_loss) = fills.iter().fold((0.0, 0.0), |(profit, loss), fill| {
         if fill.pnl > 0.0 {
             (profit + fill.pnl, loss)
@@ -231,6 +244,19 @@ fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
             (profit, loss + fill.pnl.abs())
         }
     });
+    
+    // Add hedge fills PnL to profit/loss calculation
+    let (hedge_profit, hedge_loss) = hedge_fills.iter().fold((0.0, 0.0), |(profit, loss), hf| {
+        if hf.pnl > 0.0 {
+            (profit + hf.pnl, loss)
+        } else {
+            (profit, loss + hf.pnl.abs())
+        }
+    });
+    
+    let total_profit = total_profit + hedge_profit;
+    let total_loss = total_loss + hedge_loss;
+    
     let loss_profit_ratio = if total_profit == 0.0 {
         f64::INFINITY
     } else {
@@ -243,6 +269,7 @@ fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
     let mut last_fill_time: HashMap<String, usize> = HashMap::new(); // Last fill time per position
     let mut unchanged_durations: Vec<usize> = Vec::new(); // Durations of unchanged periods
 
+    // Process regular fills
     for fill in fills {
         let side = if fill.order_type.is_long() {
             "long"
@@ -272,6 +299,30 @@ fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
                 positions_opened.remove(&key);
                 last_fill_time.remove(&key); // Reset tracking
             }
+        }
+    }
+
+    // Process hedge fills (always hedge_short positions)
+    for hedge_fill in hedge_fills {
+        let key = format!("{}_hedge", hedge_fill.coin);
+
+        if hedge_fill.is_entry {
+            // Hedge position opened
+            positions_opened.insert(key.clone(), hedge_fill.index);
+            last_fill_time.insert(key.clone(), hedge_fill.index);
+        } else {
+            // Hedge position closed
+            if let Some(&start_idx) = positions_opened.get(&key) {
+                durations.push(hedge_fill.index - start_idx);
+                positions_opened.remove(&key);
+            }
+            
+            // Calculate unchanged duration
+            if let Some(&last_time) = last_fill_time.get(&key) {
+                let unchanged_duration = hedge_fill.index - last_time;
+                unchanged_durations.push(unchanged_duration);
+            }
+            last_fill_time.remove(&key);
         }
     }
 
@@ -322,7 +373,7 @@ fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
     let equity_jerkiness = calc_equity_jerkiness(&daily_eqs);
     let exponential_fit_error = calc_exponential_fit_error(&daily_eqs);
 
-    let volume_pct_per_day_avg = calc_avg_volume_pct_per_day(fills);
+    let volume_pct_per_day_avg = calc_avg_volume_pct_per_day(fills, hedge_fills);
 
     let mut analysis = Analysis::default();
     analysis.adg = adg;
@@ -354,8 +405,8 @@ fn analyze_backtest_basic(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
     analysis
 }
 
-pub fn analyze_backtest(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
-    let mut analysis = analyze_backtest_basic(fills, equities);
+pub fn analyze_backtest(fills: &[Fill], equities: &Vec<f64>, hedge_fills: &[HedgeFill]) -> Analysis {
+    let mut analysis = analyze_backtest_basic(fills, equities, hedge_fills);
 
     if fills.len() <= 1 {
         return analysis;
@@ -392,7 +443,14 @@ pub fn analyze_backtest(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
             break;
         }
 
-        let subset_analysis = analyze_backtest_basic(&subset_fills, &subset_equities.to_vec());
+        // filter hedge fills that happened after or at start_idx
+        let subset_hedge_fills: Vec<HedgeFill> = hedge_fills
+            .iter()
+            .filter(|hf| hf.index >= start_idx)
+            .cloned()
+            .collect();
+
+        let subset_analysis = analyze_backtest_basic(&subset_fills, &subset_equities.to_vec(), &subset_hedge_fills);
         subset_analyses.push(subset_analysis);
     }
 
@@ -441,9 +499,10 @@ pub fn analyze_backtest(fills: &[Fill], equities: &Vec<f64>) -> Analysis {
 pub fn analyze_backtest_pair(
     fills: &[Fill],
     equities: &Equities,
+    hedge_fills: &[HedgeFill],
     use_btc_collateral: bool,
 ) -> (Analysis, Analysis) {
-    let analysis_usd = analyze_backtest(fills, &equities.usd);
+    let analysis_usd = analyze_backtest(fills, &equities.usd, hedge_fills);
     if !use_btc_collateral {
         return (analysis_usd.clone(), analysis_usd);
     }
@@ -452,7 +511,16 @@ pub fn analyze_backtest_pair(
         fill.balance_usd_total /= fill.btc_price; // Use actual BTC balance if available
         fill.pnl = fill.pnl / fill.btc_price; // Convert PNL to BTC
     }
-    let analysis_btc = analyze_backtest(&btc_fills, &equities.btc);
+    
+    // Convert hedge fills to BTC
+    let mut btc_hedge_fills = hedge_fills.to_vec();
+    for hf in btc_hedge_fills.iter_mut() {
+        hf.balance_usd_total /= hf.btc_price; // Convert balance to BTC
+        hf.pnl /= hf.btc_price; // Convert PnL to BTC
+        hf.fee_paid /= hf.btc_price; // Convert fee to BTC
+    }
+    
+    let analysis_btc = analyze_backtest(&btc_fills, &equities.btc, &btc_hedge_fills);
     (analysis_usd, analysis_btc)
 }
 
@@ -573,8 +641,8 @@ pub fn smoothed_terminal_geometric_gain_and_adg(daily_eqs: &[f64]) -> (f64, f64)
 
 /// Calculates average volume per day as a percentage of balance.
 /// For each fill: abs(qty) * price / balance_at_fill
-pub fn calc_avg_volume_pct_per_day(fills: &[Fill]) -> f64 {
-    if fills.is_empty() {
+pub fn calc_avg_volume_pct_per_day(fills: &[Fill], hedge_fills: &[HedgeFill]) -> f64 {
+    if fills.is_empty() && hedge_fills.is_empty() {
         return 0.0;
     }
 
@@ -582,9 +650,17 @@ pub fn calc_avg_volume_pct_per_day(fills: &[Fill]) -> f64 {
     use std::collections::HashMap;
     let mut daily_totals: HashMap<usize, f64> = HashMap::new();
 
+    // Process regular fills
     for fill in fills {
         let day = fill.index / 1440;
         let cost_pct = (fill.fill_qty.abs() * fill.fill_price) / fill.balance_usd_total;
+        *daily_totals.entry(day).or_insert(0.0) += cost_pct;
+    }
+
+    // Process hedge fills
+    for hedge_fill in hedge_fills {
+        let day = hedge_fill.index / 1440;
+        let cost_pct = (hedge_fill.fill_qty.abs() * hedge_fill.fill_price) / hedge_fill.balance_usd_total;
         *daily_totals.entry(day).or_insert(0.0) += cost_pct;
     }
 

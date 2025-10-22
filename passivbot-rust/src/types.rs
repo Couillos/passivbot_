@@ -129,7 +129,6 @@ pub struct BotParams {
     pub unstuck_threshold: f64,
     pub hedge_sma_len: usize,
     pub hedge_fall_pct: f64,
-    pub hedge_stop_loss_pct: f64,
 }
 
 #[derive(Debug)]
@@ -276,6 +275,10 @@ pub struct HedgeFill {
     pub coin: String,
     pub pnl: f64,
     pub fee_paid: f64,
+    pub balance_usd_total: f64,
+    pub balance_btc: f64,
+    pub balance_usd: f64,
+    pub btc_price: f64,
     pub fill_qty: f64,
     pub fill_price: f64,
     pub position_size: f64,

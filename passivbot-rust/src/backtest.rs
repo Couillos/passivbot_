@@ -234,9 +234,14 @@ pub struct Backtest<'a> {
     n_eligible_short: usize,
     // Hedging system (separate from main short logic)
     hedge_positions: HashMap<usize, HedgePosition>,
-    hedge_sma: Vec<Vec<f64>>, // SMA buffer for each coin
+    hedge_sma_buffer: Vec<Vec<f64>>, // SMA circular buffer for each coin
+    hedge_sma_sum: Vec<f64>,         // Running sum for each coin
+    hedge_sma_idx: Vec<usize>,       // Current index in circular buffer
     hedge_fills: Vec<HedgeFill>,
     hedge_equity: Vec<f64>, // Total hedge equity over time
+    hedge_enabled_global: bool,      // True if any coin has hedging enabled
+    hedge_enabled_coins: Vec<bool>,  // Per-coin hedge enabled flag
+    hedge_realized_pnl: f64,         // Running total of realized hedge PnL
     // removed rolling_volume_sum & buffer — replaced by per-coin EMAs in `emas`
 }
 
@@ -415,6 +420,13 @@ impl<'a> Backtest<'a> {
         let any_trailing_long = trailing_enabled.iter().any(|te| te.long);
         let any_trailing_short = trailing_enabled.iter().any(|te| te.short);
 
+        // Check which coins have hedging enabled
+        let hedge_enabled_coins: Vec<bool> = bot_params
+            .iter()
+            .map(|bp| bp.long.hedge_sma_len > 0 && bp.long.hedge_fall_pct > 0.0)
+            .collect();
+        let hedge_enabled_global = hedge_enabled_coins.iter().any(|&e| e);
+
         Backtest {
             hlcvs,
             btc_usd_prices,
@@ -464,9 +476,14 @@ impl<'a> Backtest<'a> {
             n_eligible_long,
             n_eligible_short,
             hedge_positions: HashMap::new(),
-            hedge_sma: vec![Vec::new(); n_coins],
+            hedge_sma_buffer: vec![Vec::new(); n_coins],
+            hedge_sma_sum: vec![0.0; n_coins],
+            hedge_sma_idx: vec![0; n_coins],
             hedge_fills: Vec::new(),
             hedge_equity: Vec::new(),
+            hedge_enabled_global,
+            hedge_enabled_coins,
+            hedge_realized_pnl: 0.0,
             // EMAs already initialized in `emas`; no rolling buffers needed
         }
     }
@@ -816,6 +833,32 @@ impl<'a> Backtest<'a> {
                 position.price,
                 current_price,
                 position.size,
+                self.exchange_params_list[idx].c_mult,
+            );
+            equity_usd += upnl;
+            equity_btc += upnl / self.btc_usd_prices[k];
+        }
+
+        // Add unrealized PnL from hedge positions
+        let mut hedge_keys: Vec<usize> = self.hedge_positions.keys().cloned().collect();
+        hedge_keys.sort();
+        for idx in hedge_keys {
+            let hedge_pos = &self.hedge_positions[&idx];
+            if !hedge_pos.is_active {
+                continue;
+            }
+            if !self.coin_is_valid_at(idx, k) {
+                continue;
+            }
+            let current_price = self.hlcvs[[k, idx, CLOSE]];
+            if !current_price.is_finite() || current_price <= 0.0 {
+                continue;
+            }
+            // For short hedge positions: use calc_pnl_short for consistency
+            let upnl = calc_pnl_short(
+                hedge_pos.entry_price,
+                current_price,
+                hedge_pos.size,
                 self.exchange_params_list[idx].c_mult,
             );
             equity_usd += upnl;
@@ -1860,24 +1903,51 @@ impl<'a> Backtest<'a> {
             return;
         }
         
-        // Add current close to buffer
-        self.hedge_sma[idx].push(close);
+        let buf = &mut self.hedge_sma_buffer[idx];
         
-        // Keep only last sma_len values
-        if self.hedge_sma[idx].len() > sma_len {
-            self.hedge_sma[idx].remove(0);
+        // Initialize buffer on first use
+        if buf.is_empty() {
+            buf.resize(sma_len, 0.0);
+            self.hedge_sma_sum[idx] = 0.0;
+            self.hedge_sma_idx[idx] = 0;
         }
+        
+        // Circular buffer: subtract old value, add new value
+        let pos = self.hedge_sma_idx[idx];
+        self.hedge_sma_sum[idx] -= buf[pos];
+        self.hedge_sma_sum[idx] += close;
+        buf[pos] = close;
+        
+        // Move to next position (circular)
+        self.hedge_sma_idx[idx] = (pos + 1) % sma_len;
     }
     
     #[inline]
     fn get_hedge_sma(&self, idx: usize) -> Option<f64> {
         let sma_len = self.bot_params[idx].long.hedge_sma_len;
-        if sma_len == 0 || self.hedge_sma[idx].len() < sma_len {
+        if sma_len == 0 {
             return None;
         }
         
-        let sum: f64 = self.hedge_sma[idx].iter().sum();
-        Some(sum / sma_len as f64)
+        let buf = &self.hedge_sma_buffer[idx];
+        if buf.is_empty() {
+            return None;
+        }
+        
+        // Check if buffer is fully filled
+        let current_idx = self.hedge_sma_idx[idx];
+        let filled_count = if buf[current_idx] == 0.0 && self.hedge_sma_sum[idx] == 0.0 {
+            // Buffer not yet full
+            current_idx
+        } else {
+            sma_len
+        };
+        
+        if filled_count < sma_len {
+            return None;
+        }
+        
+        Some(self.hedge_sma_sum[idx] / sma_len as f64)
     }
     
     fn check_hedge_entry(&mut self, k: usize, idx: usize) {
@@ -1925,6 +1995,25 @@ impl<'a> Backtest<'a> {
             return; // Distance not large enough
         }
         
+        // Check if position is at 99% of its max exposure per position
+        // wallet_exposure = cost / balance (no TWE factor)
+        // wallet_exposure_limit (bp.wallet_exposure_limit) = TWE / n_positions (already normalized per position)
+        // So we need: wallet_exposure >= 0.99 * wallet_exposure_limit
+        let position_cost = qty_to_cost(long_pos.size, long_pos.price, ep.c_mult);
+        let wallet_exposure = calc_wallet_exposure(
+            ep.c_mult,
+            self.balance.usd_total,
+            position_cost,
+            long_pos.price,
+        );
+        
+        // bp.wallet_exposure_limit is already the per-position limit (TWE / n_positions)
+        let exposure_threshold = 0.80 * bp.wallet_exposure_limit;
+        
+        if wallet_exposure < exposure_threshold {
+            return; // Position not at 99% of its max exposure per position
+        }
+        
         // Enter hedge short
         let hedge_qty = long_pos.size;
         
@@ -1933,7 +2022,11 @@ impl<'a> Backtest<'a> {
         }
         
         // Execute hedge entry
-        let fee = hedge_qty * close * self.backtest_params.maker_fee;
+        // Fee is negative (cost) like for normal entry positions
+        let fee_paid = -hedge_qty * close * self.backtest_params.maker_fee;
+        
+        // Update balance for fee (pnl = 0 for entry)
+        self.update_balance(k, 0.0, fee_paid);
         
         self.hedge_positions.insert(
             idx,
@@ -1948,20 +2041,16 @@ impl<'a> Backtest<'a> {
             index: k,
             coin: self.backtest_params.coins[idx].clone(),
             pnl: 0.0,
-            fee_paid: fee,
+            fee_paid,                                  // Negative (cost)
+            balance_usd_total: self.balance.usd_total, // Balance after update
+            balance_btc: self.balance.btc,             // Balance after update
+            balance_usd: self.balance.usd,             // Balance after update
+            btc_price: self.btc_usd_prices[k],
             fill_qty: hedge_qty,
             fill_price: close,
             position_size: hedge_qty,
             is_entry: true,
         });
-        
-        // Update balance for fee
-        if self.balance.use_btc_collateral {
-            let btc_price = self.btc_usd_prices[k];
-            self.balance.btc -= fee / btc_price;
-        } else {
-            self.balance.usd -= fee;
-        }
     }
     
     fn check_hedge_exit(&mut self, k: usize, idx: usize) {
@@ -1970,27 +2059,37 @@ impl<'a> Backtest<'a> {
             _ => return,
         };
         
-        let bp = &self.bot_params[idx].long;
-        
         let close = self.hlcvs[[k, idx, CLOSE]];
+        let prev_close = if k > 0 {
+            self.hlcvs[[k - 1, idx, CLOSE]]
+        } else {
+            self.hlcvs[[k, idx, CLOSE]]
+        };
+
         if !close.is_finite() || close <= 0.0 {
             return;
         }
         
         let mut should_exit = false;
         
-        // Exit condition 1: Price crosses above SMA
+        // Exit condition 0: Price crosses above SMA
         if let Some(sma) = self.get_hedge_sma(idx) {
             if close > sma {
                 should_exit = true;
             }
         }
-        
-        // Exit condition 2: Stop loss hit (price rose too much)
-        let stop_loss_price = hedge_pos.entry_price * (1.0 + bp.hedge_stop_loss_pct);
-        if close >= stop_loss_price {
+
+        // Exit condition 1: Prices crosses above short position price
+        if prev_close > hedge_pos.entry_price {
             should_exit = true;
         }
+
+        // // Exit condition 2: Price crosses above long position price
+        // if let Some(long_pos) = self.positions.long.get(&idx) {
+        //     if close >= long_pos.price {
+        //         should_exit = true;
+        //     }
+        // }
         
         // Exit condition 3: Long position was closed
         if !self.positions.long.contains_key(&idx) {
@@ -2001,74 +2100,90 @@ impl<'a> Backtest<'a> {
             return;
         }
         
-        // Calculate PnL for short: profit when price falls
-        let pnl = hedge_pos.size * (hedge_pos.entry_price - close);
-        let fee = hedge_pos.size * close * self.backtest_params.maker_fee;
-        let net_pnl = pnl - fee;
+        // Calculate PnL for short hedge position using calc_pnl_short
+        let pnl = calc_pnl_short(
+            hedge_pos.entry_price,
+            close,
+            hedge_pos.size,
+            self.exchange_params_list[idx].c_mult,
+        );
+        // Fee is negative (cost) like for normal positions
+        let fee_paid = -hedge_pos.size * close * self.backtest_params.maker_fee;
         
-        // Update balance
-        if self.balance.use_btc_collateral {
-            let btc_price = self.btc_usd_prices[k];
-            self.balance.btc += net_pnl / btc_price;
-        } else {
-            self.balance.usd += net_pnl;
-        }
+        // Update balance using the same method as normal positions
+        self.update_balance(k, pnl, fee_paid);
         
         self.hedge_fills.push(HedgeFill {
             index: k,
             coin: self.backtest_params.coins[idx].clone(),
-            pnl: net_pnl,
-            fee_paid: fee,
+            pnl,                                       // PnL before fees
+            fee_paid,                                  // Negative (cost)
+            balance_usd_total: self.balance.usd_total, // Balance after update
+            balance_btc: self.balance.btc,             // Balance after update
+            balance_usd: self.balance.usd,             // Balance after update
+            btc_price: self.btc_usd_prices[k],
             fill_qty: hedge_pos.size,
             fill_price: close,
             position_size: 0.0,
             is_entry: false,
         });
         
+        // Update running realized PnL (pnl already includes fees via update_balance)
+        self.hedge_realized_pnl += pnl + fee_paid;
+        
         // Remove hedge position
         self.hedge_positions.remove(&idx);
     }
     
     fn update_hedges(&mut self, k: usize) {
-        // Check if hedging is enabled for any coin
-        let hedging_enabled = self.bot_params.iter().any(|bp| bp.long.hedge_sma_len > 0 && bp.long.hedge_fall_pct > 0.0);
-        
-        // Debug: log on first call
-        if k == 1 {
-            eprintln!("[HEDGE DEBUG] hedging_enabled = {}", hedging_enabled);
-            if !hedging_enabled {
-                eprintln!("[HEDGE DEBUG] Hedging is DISABLED - will push zeros to hedge_equity");
-            }
-        }
-        
-        if !hedging_enabled {
-            // Push a zero equity value to keep alignment with main equities
+        if !self.hedge_enabled_global {
             self.hedge_equity.push(0.0);
             return;
         }
         
-        for idx in 0..self.n_coins {
+        // Use HashSet to avoid O(n²) contains checks
+        let mut coins_to_check = HashSet::with_capacity(self.n_coins);
+        
+        // Add coins with active hedge positions (must check exit)
+        for &idx in self.hedge_positions.keys() {
+            coins_to_check.insert(idx);
+        }
+        
+        // Add coins with long positions AND hedging enabled (may need entry)
+        for &idx in self.positions.long.keys() {
+            if self.hedge_enabled_coins[idx] {
+                coins_to_check.insert(idx);
+            }
+        }
+        
+        // Process only relevant coins
+        for idx in coins_to_check {
             if !self.coin_is_valid_at(idx, k) {
                 continue;
             }
             
-            // Update SMA buffer
-            self.update_hedge_sma(k, idx);
+            // Update SMA buffer only if hedging is enabled for this coin
+            if self.hedge_enabled_coins[idx] {
+                self.update_hedge_sma(k, idx);
+            }
             
             // Check for exits first (more urgent)
             self.check_hedge_exit(k, idx);
             
-            // Then check for new entries
-            self.check_hedge_entry(k, idx);
+            // Then check for new entries (only if enabled for this coin)
+            if self.hedge_enabled_coins[idx] {
+                self.check_hedge_entry(k, idx);
+            }
         }
         
         // Calculate and store hedge equity
         self.update_hedge_equity(k);
     }
     
+    #[inline]
     fn update_hedge_equity(&mut self, k: usize) {
         // Calculate total unrealized PnL from all active hedge positions
-        let mut total_hedge_pnl = 0.0;
+        let mut unrealized_pnl = 0.0;
         
         for (idx, hedge_pos) in &self.hedge_positions {
             if !hedge_pos.is_active {
@@ -2080,16 +2195,17 @@ impl<'a> Backtest<'a> {
                 continue;
             }
             
-            // For short positions: profit when price falls
-            let unrealized_pnl = hedge_pos.size * (hedge_pos.entry_price - close);
-            total_hedge_pnl += unrealized_pnl;
+            // For short hedge positions: use calc_pnl_short for consistency
+            unrealized_pnl += calc_pnl_short(
+                hedge_pos.entry_price,
+                close,
+                hedge_pos.size,
+                self.exchange_params_list[*idx].c_mult,
+            );
         }
         
-        // Add realized PnL from all hedge fills so far
-        let realized_pnl: f64 = self.hedge_fills.iter().map(|f| f.pnl).sum();
-        
-        // Total hedge equity = realized + unrealized
-        let hedge_equity = realized_pnl + total_hedge_pnl;
+        // Total hedge equity = realized + unrealized (no need to sum fills every time)
+        let hedge_equity = self.hedge_realized_pnl + unrealized_pnl;
         
         self.hedge_equity.push(hedge_equity);
     }

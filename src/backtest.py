@@ -693,17 +693,36 @@ def post_process(
     json.dump(analysis, open(f"{results_path}analysis.json", "w"), indent=4, sort_keys=True)
     config["analysis"] = analysis
     dump_config(config, f"{results_path}config.json")
-    fdf.to_csv(f"{results_path}fills.csv")
-    bal_eq.to_csv(oj(results_path, "balance_and_equity.csv"))
     
-    # Save hedge fills if available
+    # Combine regular fills and hedge fills
     if hedge_fills is not None and len(hedge_fills) > 0:
+        # Convert hedge fills to DataFrame with same structure as regular fills
         hedge_df = pd.DataFrame(
             hedge_fills,
-            columns=["minute", "coin", "pnl", "fee_paid", "qty", "price", "is_entry"]
+            columns=["minute", "coin", "pnl", "fee_paid", "balance", "balance_btc", 
+                     "balance_usd", "btc_price", "qty", "price", "psize", "pprice", "is_entry"]
         )
-        hedge_df.to_csv(f"{results_path}hedge_fills.csv")
-        logging.info(f"Saved {len(hedge_fills)} hedge fills to hedge_fills.csv")
+        
+        # Set type based on is_entry flag
+        hedge_df["type"] = hedge_df["is_entry"].apply(lambda x: "hedge_entry" if x else "hedge_exit")
+        
+        # Drop the is_entry column as it's now encoded in type
+        hedge_df = hedge_df.drop(columns=["is_entry"])
+        
+        # Reorder columns to match fdf
+        hedge_df = hedge_df[["minute", "coin", "pnl", "fee_paid", "balance", "balance_btc", 
+                             "balance_usd", "btc_price", "qty", "price", "psize", "pprice", "type"]]
+        
+        # Combine with regular fills and sort by minute
+        combined_fills = pd.concat([fdf, hedge_df], ignore_index=True)
+        combined_fills = combined_fills.sort_values("minute").reset_index(drop=True)
+        combined_fills.to_csv(f"{results_path}fills.csv")
+        
+        logging.info(f"Saved {len(fdf)} regular fills + {len(hedge_fills)} hedge fills = {len(combined_fills)} total fills to fills.csv")
+    else:
+        fdf.to_csv(f"{results_path}fills.csv")
+    
+    bal_eq.to_csv(oj(results_path, "balance_and_equity.csv"))
     
     plot_forager(
         results_path,
@@ -826,7 +845,7 @@ def plot_forager(
         
         plt.tight_layout()
     
-    plt.savefig(oj(results_path, "balance_and_equity.png"))
+    plt.savefig(oj(results_path, "balance_and_equity.png"), bbox_inches='tight')
     plt.close()
     
     # Dark theme balance and equity plot (log scale)
@@ -854,7 +873,7 @@ def plot_forager(
             family="monospace", transform=ax.transAxes, 
             bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
     
-    plt.savefig(oj(results_path, "balance_and_equity_logy.png"))
+    plt.savefig(oj(results_path, "balance_and_equity_logy.png"), bbox_inches='tight')
     
     # BTC collateral plots with dark theme
     if bool(require_config_value(config, "backtest.use_btc_collateral")):
@@ -899,7 +918,7 @@ def plot_forager(
                 family="monospace", transform=ax.transAxes, 
                 bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
         
-        plt.savefig(oj(results_path, "balance_and_equity_btc.png"))
+        plt.savefig(oj(results_path, "balance_and_equity_btc.png"), bbox_inches='tight')
         
         plt.clf()
         plt.style.use("dark_background")
@@ -925,7 +944,7 @@ def plot_forager(
                 family="monospace", transform=ax.transAxes, 
                 bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
         
-        plt.savefig(oj(results_path, "balance_and_equity_btc_logy.png"))
+        plt.savefig(oj(results_path, "balance_and_equity_btc_logy.png"), bbox_inches='tight')
 
     if not config["disable_plotting"]:
         for i, coin in enumerate(require_config_value(config, f"backtest.coins.{exchange}")):

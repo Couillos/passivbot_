@@ -127,7 +127,7 @@ pub fn run_backtest(
     Python::with_gil(|py| {
         let (fills, equities, hedge_fills, hedge_equity) = backtest.run();
         let (analysis_usd, analysis_btc) =
-            analyze_backtest_pair(&fills, &equities, backtest.balance.use_btc_collateral);
+            analyze_backtest_pair(&fills, &equities, &hedge_fills, backtest.balance.use_btc_collateral);
 
         // Create a dictionary to store analysis results using a more concise approach
         let py_analysis_usd = struct_to_py_dict(py, &analysis_usd)?;
@@ -149,16 +149,22 @@ pub fn run_backtest(
             py_fills[(i, 12)] = fill.order_type.to_string().into_py(py);
         }
 
-        // Process hedge fills
-        let mut py_hedge_fills = Array2::from_elem((hedge_fills.len(), 7), py.None());
+        // Process hedge fills - same structure as regular fills
+        let mut py_hedge_fills = Array2::from_elem((hedge_fills.len(), 13), py.None());
         for (i, hf) in hedge_fills.iter().enumerate() {
             py_hedge_fills[(i, 0)] = hf.index.into_py(py);
             py_hedge_fills[(i, 1)] = <String as Clone>::clone(&hf.coin).into_py(py);
             py_hedge_fills[(i, 2)] = hf.pnl.into_py(py);
             py_hedge_fills[(i, 3)] = hf.fee_paid.into_py(py);
-            py_hedge_fills[(i, 4)] = hf.fill_qty.into_py(py);
-            py_hedge_fills[(i, 5)] = hf.fill_price.into_py(py);
-            py_hedge_fills[(i, 6)] = hf.is_entry.into_py(py);
+            py_hedge_fills[(i, 4)] = hf.balance_usd_total.into_py(py);
+            py_hedge_fills[(i, 5)] = hf.balance_btc.into_py(py);
+            py_hedge_fills[(i, 6)] = hf.balance_usd.into_py(py);
+            py_hedge_fills[(i, 7)] = hf.btc_price.into_py(py);
+            py_hedge_fills[(i, 8)] = hf.fill_qty.into_py(py);
+            py_hedge_fills[(i, 9)] = hf.fill_price.into_py(py);
+            py_hedge_fills[(i, 10)] = hf.position_size.into_py(py);
+            py_hedge_fills[(i, 11)] = hf.fill_price.into_py(py); // pprice = fill_price for hedge
+            py_hedge_fills[(i, 12)] = hf.is_entry.into_py(py);
         }
 
         let py_equities_usd = Array1::from_vec(equities.usd)
@@ -321,7 +327,6 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
             val.round() as usize
         },
         hedge_fall_pct: extract_value(dict, "hedge_fall_pct").unwrap_or(0.20),
-        hedge_stop_loss_pct: extract_value(dict, "hedge_stop_loss_pct").unwrap_or(0.02),
     })
 }
 
