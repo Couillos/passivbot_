@@ -2008,7 +2008,7 @@ impl<'a> Backtest<'a> {
         );
         
         // bp.wallet_exposure_limit is already the per-position limit (TWE / n_positions)
-        let exposure_threshold = 0.80 * bp.wallet_exposure_limit;
+        let exposure_threshold = 0.95 * bp.wallet_exposure_limit;
         
         if wallet_exposure < exposure_threshold {
             return; // Position not at 99% of its max exposure per position
@@ -2025,8 +2025,14 @@ impl<'a> Backtest<'a> {
         // Fee is negative (cost) like for normal entry positions
         let fee_paid = -hedge_qty * close * self.backtest_params.maker_fee;
         
+        // Calculate initial stop-loss price (above entry for short hedge)
+        // Extract the value before any mutable borrow
+        let hedge_sl_pct = bp.hedge_sl_pct;
+        
         // Update balance for fee (pnl = 0 for entry)
         self.update_balance(k, 0.0, fee_paid);
+        
+        let sl_price = close * (1.0 + hedge_sl_pct);
         
         self.hedge_positions.insert(
             idx,
@@ -2034,6 +2040,9 @@ impl<'a> Backtest<'a> {
                 size: hedge_qty,
                 entry_price: close,
                 is_active: true,
+                entry_timestamp_minutes: k as u64, // k is already in minutes
+                sl_price,
+                sl_moved_to_be: false,
             },
         );
         
@@ -2060,55 +2069,87 @@ impl<'a> Backtest<'a> {
         };
         
         let close = self.hlcvs[[k, idx, CLOSE]];
+        let high = self.hlcvs[[k, idx, HIGH]];
         let prev_close = if k > 0 {
             self.hlcvs[[k - 1, idx, CLOSE]]
         } else {
             self.hlcvs[[k, idx, CLOSE]]
         };
 
-        if !close.is_finite() || close <= 0.0 {
+        if !close.is_finite() || close <= 0.0 || !high.is_finite() {
             return;
         }
         
-        let mut should_exit = false;
+        let bp = &self.bot_params[idx].long;
+        let time_elapsed_minutes = k as u64 - hedge_pos.entry_timestamp_minutes;
         
-        // Exit condition 0: Price crosses above SMA
-        if let Some(sma) = self.get_hedge_sma(idx) {
-            if close > sma {
-                should_exit = true;
-            }
+        // Update stop-loss to break-even if enough time has passed and not already moved
+        let mut updated_hedge_pos = hedge_pos.clone();
+        if !updated_hedge_pos.sl_moved_to_be && time_elapsed_minutes >= bp.hedge_t_sl_to_be_minutes as u64 {
+            updated_hedge_pos.sl_moved_to_be = true;
+            self.hedge_positions.insert(idx, updated_hedge_pos.clone());
         }
+        
+        let mut should_exit = false;
+        let mut exit_reason = "";
+        let sma_opt = self.get_hedge_sma(idx);
 
-        // Exit condition 1: Prices crosses above short position price
-        if prev_close > hedge_pos.entry_price {
+        // Exit condition 1: Stop-loss hit (price went above SL)
+        if updated_hedge_pos.sl_moved_to_be && high >= updated_hedge_pos.sl_price {
             should_exit = true;
-        }
-
-        // // Exit condition 2: Price crosses above long position price
-        // if let Some(long_pos) = self.positions.long.get(&idx) {
-        //     if close >= long_pos.price {
-        //         should_exit = true;
+            exit_reason = "stop_loss";
+        // Exit condition 2: Break-even / SMA cross (only if SMA is available)
+        // } else if !updated_hedge_pos.sl_moved_to_be {
+        //     if let Some(sma) = sma_opt {
+        //         if high >= sma {
+        //             should_exit = true;
+        //             exit_reason = "sma_cross";
+        //         }
         //     }
         // }
-        
-        // Exit condition 3: Long position was closed
-        if !self.positions.long.contains_key(&idx) {
+        } else if !updated_hedge_pos.sl_moved_to_be && high >= updated_hedge_pos.entry_price {
             should_exit = true;
+            exit_reason = "break_even";
+        }
+        
+        // Exit condition 1: Price crosses above SMA
+        // if !should_exit {
+            // if let Some(sma) = self.get_hedge_sma(idx) {
+            //     if high > sma {
+            //         should_exit = true;
+            //         exit_reason = "sma_cross";
+            //     }
+            // }
+        // }
+
+        // Exit condition 3: Long position was closed
+        if !should_exit && !self.positions.long.contains_key(&idx) {
+            should_exit = true;
+            exit_reason = "long_closed";
         }
         
         if !should_exit {
             return;
         }
         
+        // Use SL price if stop-loss was hit, otherwise use close price
+        let exit_price = if exit_reason == "stop_loss" {
+            hedge_pos.sl_price
+        } else if exit_reason == "sma_cross" {
+            high
+        } else {
+            hedge_pos.entry_price
+        };
+        
         // Calculate PnL for short hedge position using calc_pnl_short
         let pnl = calc_pnl_short(
-            hedge_pos.entry_price,
-            close,
-            hedge_pos.size,
+            updated_hedge_pos.entry_price,
+            exit_price,
+            updated_hedge_pos.size,
             self.exchange_params_list[idx].c_mult,
         );
         // Fee is negative (cost) like for normal positions
-        let fee_paid = -hedge_pos.size * close * self.backtest_params.maker_fee;
+        let fee_paid = -updated_hedge_pos.size * exit_price * self.backtest_params.maker_fee;
         
         // Update balance using the same method as normal positions
         self.update_balance(k, pnl, fee_paid);
@@ -2122,8 +2163,8 @@ impl<'a> Backtest<'a> {
             balance_btc: self.balance.btc,             // Balance after update
             balance_usd: self.balance.usd,             // Balance after update
             btc_price: self.btc_usd_prices[k],
-            fill_qty: hedge_pos.size,
-            fill_price: close,
+            fill_qty: updated_hedge_pos.size,
+            fill_price: exit_price,
             position_size: 0.0,
             is_entry: false,
         });

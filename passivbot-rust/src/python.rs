@@ -327,6 +327,11 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
             val.round() as usize
         },
         hedge_fall_pct: extract_value(dict, "hedge_fall_pct").unwrap_or(0.20),
+        hedge_sl_pct: extract_value(dict, "hedge_sl_pct").unwrap_or(0.008),
+        hedge_t_sl_to_be_minutes: {
+            let val: f64 = extract_value(dict, "hedge_t_sl_to_be_minutes").unwrap_or(30.0);
+            val.round() as usize
+        },
     })
 }
 

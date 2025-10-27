@@ -129,6 +129,8 @@ pub struct BotParams {
     pub unstuck_threshold: f64,
     pub hedge_sma_len: usize,
     pub hedge_fall_pct: f64,
+    pub hedge_sl_pct: f64,
+    pub hedge_t_sl_to_be_minutes: usize,
 }
 
 #[derive(Debug)]
@@ -267,6 +269,9 @@ pub struct HedgePosition {
     pub size: f64,
     pub entry_price: f64,
     pub is_active: bool,
+    pub entry_timestamp_minutes: u64, // Index k (in minutes from backtest start)
+    pub sl_price: f64,
+    pub sl_moved_to_be: bool,
 }
 
 #[derive(Debug, Clone)]

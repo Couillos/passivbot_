@@ -1121,7 +1121,8 @@ def get_template_config(passivbot_mode="v7"):
                 "unstuck_threshold": 0.916,
                 "hedge_sma_len": 10,
                 "hedge_fall_pct": 0.2,
-                "hedge_stop_loss_pct": 0.02,
+                "hedge_sl_pct": 0.008,
+                "hedge_t_sl_to_be_minutes": 30,
             },
             "short": {
                 "close_grid_markup_end": 0.0089,
@@ -1212,6 +1213,11 @@ def get_template_config(passivbot_mode="v7"):
                 "long_unstuck_ema_dist": [-0.1, 0.01],
                 "long_unstuck_loss_allowance_pct": [0.001, 0.05],
                 "long_unstuck_threshold": [0.4, 0.95],
+                "long_hedge_sma_len": [5, 50],
+                "long_hedge_fall_pct": [0.05, 0.50],
+                "long_hedge_sl_pct": [0.005, 0.02],
+                "long_hedge_t_sl_to_be_minutes": [10, 120],
+                
                 "short_close_grid_markup_end": [0.001, 0.03],
                 "short_close_grid_markup_start": [0.001, 0.03],
                 "short_close_grid_qty_pct": [0.05, 1.0],
