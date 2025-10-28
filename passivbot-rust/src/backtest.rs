@@ -423,7 +423,7 @@ impl<'a> Backtest<'a> {
         // Check which coins have hedging enabled
         let hedge_enabled_coins: Vec<bool> = bot_params
             .iter()
-            .map(|bp| bp.long.hedge_sma_len > 0 && bp.long.hedge_fall_pct > 0.0)
+            .map(|bp| bp.long.hedge_enabled)
             .collect();
         let hedge_enabled_global = hedge_enabled_coins.iter().any(|&e| e);
 
@@ -1964,24 +1964,18 @@ impl<'a> Backtest<'a> {
         let bp = &self.bot_params[idx].long;
         let ep = &self.exchange_params_list[idx];
         
-        // Check if hedging is enabled (hedge_sma_len > 0 and hedge_fall_pct > 0)
-        if bp.hedge_sma_len == 0 || bp.hedge_fall_pct <= 0.0 {
+        // Check if hedging is enabled
+        if !bp.hedge_enabled {
+            return;
+        }
+        
+        // Check if hedge_fall_pct is valid
+        if bp.hedge_fall_pct <= 0.0 {
             return;
         }
         
         let close = self.hlcvs[[k, idx, CLOSE]];
         if !close.is_finite() || close <= 0.0 {
-            return;
-        }
-        
-        // Get SMA
-        let sma = match self.get_hedge_sma(idx) {
-            Some(s) => s,
-            None => return, // Not enough data yet
-        };
-        
-        // Check if price is below SMA (required condition)
-        if close >= sma {
             return;
         }
         
@@ -1995,10 +1989,10 @@ impl<'a> Backtest<'a> {
             return; // Distance not large enough
         }
         
-        // Check if position is at 99% of its max exposure per position
+        // Check if position is at 95% of its max exposure per position
         // wallet_exposure = cost / balance (no TWE factor)
         // wallet_exposure_limit (bp.wallet_exposure_limit) = TWE / n_positions (already normalized per position)
-        // So we need: wallet_exposure >= 0.99 * wallet_exposure_limit
+        // So we need: wallet_exposure >= 0.95 * wallet_exposure_limit
         let position_cost = qty_to_cost(long_pos.size, long_pos.price, ep.c_mult);
         let wallet_exposure = calc_wallet_exposure(
             ep.c_mult,
@@ -2082,47 +2076,97 @@ impl<'a> Backtest<'a> {
         
         let bp = &self.bot_params[idx].long;
         let time_elapsed_minutes = k as u64 - hedge_pos.entry_timestamp_minutes;
+        let hedge_t_sl_to_be_minutes = bp.hedge_t_sl_to_be_minutes;
+        let hedge_sma_len = bp.hedge_sma_len;
         
         // Update stop-loss to break-even if enough time has passed and not already moved
         let mut updated_hedge_pos = hedge_pos.clone();
-        if !updated_hedge_pos.sl_moved_to_be && time_elapsed_minutes >= bp.hedge_t_sl_to_be_minutes as u64 {
+        if !updated_hedge_pos.sl_moved_to_be && time_elapsed_minutes >= hedge_t_sl_to_be_minutes as u64 {
+            updated_hedge_pos.sl_price = updated_hedge_pos.entry_price;
             updated_hedge_pos.sl_moved_to_be = true;
             self.hedge_positions.insert(idx, updated_hedge_pos.clone());
         }
         
         let mut should_exit = false;
         let mut exit_reason = "";
-        let sma_opt = self.get_hedge_sma(idx);
-
+        
         // Exit condition 1: Stop-loss hit (price went above SL)
-        if updated_hedge_pos.sl_moved_to_be && high >= updated_hedge_pos.sl_price {
+        if !should_exit && updated_hedge_pos.sl_moved_to_be && high >= updated_hedge_pos.sl_price {
             should_exit = true;
             exit_reason = "stop_loss";
-        // Exit condition 2: Break-even / SMA cross (only if SMA is available)
-        // } else if !updated_hedge_pos.sl_moved_to_be {
-        //     if let Some(sma) = sma_opt {
-        //         if high >= sma {
-        //             should_exit = true;
-        //             exit_reason = "sma_cross";
-        //         }
-        //     }
-        // }
-        } else if !updated_hedge_pos.sl_moved_to_be && high >= updated_hedge_pos.entry_price {
+        }
+        
+        // Exit condition 2: Max duration reached (if configured)
+        let bp = &self.bot_params[idx].long;
+        if !should_exit && bp.hedge_max_duration_minutes > 0 {
+            let hedge_duration_minutes = k.saturating_sub(updated_hedge_pos.entry_timestamp_minutes as usize);
+            if hedge_duration_minutes >= bp.hedge_max_duration_minutes {
+                should_exit = true;
+                exit_reason = "max_duration";
+                
+                // Also close the associated long position when max_duration is reached
+                if self.positions.long.contains_key(&idx) {
+                    let long_pos = &self.positions.long[&idx];
+                    let long_size = long_pos.size;
+                    let long_price = long_pos.price;
+                    let close_price = close;
+                    let c_mult = self.exchange_params_list[idx].c_mult;
+                    let maker_fee = self.backtest_params.maker_fee;
+                    let btc_price = self.btc_usd_prices[k];
+                    let coin = self.backtest_params.coins[idx].clone();
+                    
+                    // Calculate PnL for closing long
+                    let long_pnl = calc_pnl_long(
+                        long_price,
+                        close_price,
+                        -long_size,
+                        c_mult,
+                    );
+                    let long_fee = -long_size * close_price * maker_fee;
+                    
+                    // Update balance for long closure
+                    self.update_balance(k, long_pnl, long_fee);
+                    
+                    // Record long fill
+                    self.fills.push(Fill {
+                        index: k,
+                        coin,
+                        pnl: long_pnl,
+                        fee_paid: long_fee,
+                        balance_usd_total: self.balance.usd_total,
+                        balance_btc: self.balance.btc,
+                        balance_usd: self.balance.usd,
+                        btc_price,
+                        fill_qty: -long_size,
+                        fill_price: close_price,
+                        position_size: 0.0,
+                        position_price: long_price,
+                        order_type: OrderType::CloseUnstuckLong,
+                    });
+                    
+                    // Remove long position
+                    self.positions.long.remove(&idx);
+                }
+            }
+        }
+        
+        // Exit condition 3: SMA cross (only if SMA is configured and available)
+        if !should_exit && !updated_hedge_pos.sl_moved_to_be && hedge_sma_len > 0 {
+            if let Some(sma) = self.get_hedge_sma(idx) {
+                if close > sma {
+                    should_exit = true;
+                    exit_reason = "sma_cross";
+                }
+            }
+        }
+        
+        // Exit condition 4: Break-even reached (if no SMA or SMA not ready)
+        if !should_exit && !updated_hedge_pos.sl_moved_to_be && high >= updated_hedge_pos.entry_price {
             should_exit = true;
             exit_reason = "break_even";
         }
         
-        // Exit condition 1: Price crosses above SMA
-        // if !should_exit {
-            // if let Some(sma) = self.get_hedge_sma(idx) {
-            //     if high > sma {
-            //         should_exit = true;
-            //         exit_reason = "sma_cross";
-            //     }
-            // }
-        // }
-
-        // Exit condition 3: Long position was closed
+        // Exit condition 5: Long position was closed
         if !should_exit && !self.positions.long.contains_key(&idx) {
             should_exit = true;
             exit_reason = "long_closed";
@@ -2134,11 +2178,13 @@ impl<'a> Backtest<'a> {
         
         // Use SL price if stop-loss was hit, otherwise use close price
         let exit_price = if exit_reason == "stop_loss" {
-            hedge_pos.sl_price
+            updated_hedge_pos.sl_price
         } else if exit_reason == "sma_cross" {
-            high
+            close
+        } else if exit_reason == "break_even" {
+            updated_hedge_pos.entry_price
         } else {
-            hedge_pos.entry_price
+            close
         };
         
         // Calculate PnL for short hedge position using calc_pnl_short

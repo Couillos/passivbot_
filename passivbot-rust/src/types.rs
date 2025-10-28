@@ -127,10 +127,12 @@ pub struct BotParams {
     pub unstuck_ema_dist: f64,
     pub unstuck_loss_allowance_pct: f64,
     pub unstuck_threshold: f64,
+    pub hedge_enabled: bool,
     pub hedge_sma_len: usize,
     pub hedge_fall_pct: f64,
     pub hedge_sl_pct: f64,
     pub hedge_t_sl_to_be_minutes: usize,
+    pub hedge_max_duration_minutes: usize,
 }
 
 #[derive(Debug)]

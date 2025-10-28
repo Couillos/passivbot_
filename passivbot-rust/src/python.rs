@@ -322,6 +322,7 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
         unstuck_ema_dist: extract_value(dict, "unstuck_ema_dist")?,
         unstuck_loss_allowance_pct: extract_value(dict, "unstuck_loss_allowance_pct")?,
         unstuck_threshold: extract_value(dict, "unstuck_threshold")?,
+        hedge_enabled: extract_bool_value(dict, "hedge_enabled").unwrap_or(false),
         hedge_sma_len: {
             let val: f64 = extract_value(dict, "hedge_sma_len").unwrap_or(10.0);
             val.round() as usize
@@ -330,6 +331,10 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
         hedge_sl_pct: extract_value(dict, "hedge_sl_pct").unwrap_or(0.008),
         hedge_t_sl_to_be_minutes: {
             let val: f64 = extract_value(dict, "hedge_t_sl_to_be_minutes").unwrap_or(30.0);
+            val.round() as usize
+        },
+        hedge_max_duration_minutes: {
+            let val: f64 = extract_value(dict, "hedge_max_duration_minutes").unwrap_or(0.0);
             val.round() as usize
         },
     })
