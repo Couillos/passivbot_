@@ -76,7 +76,7 @@
                    "unstuck_loss_allowance_pct": 0.003297,
                    "unstuck_threshold": 0.898}},
  "coin_overrides": {},
- "live": {"approved_coins": "configs/nightmare_list.json",
+ "live": {"approved_coins": "configs/coins/nightmare_list.json",
           "auto_gs": true,
           "inactive_coin_candle_ttl": 10.0,
           "empty_means_all_approved": true,
@@ -128,11 +128,11 @@
                          "long_unstuck_threshold": [0.85, 1.0],
 
                          "long_hedge_enabled": [1, 1],
-                         "long_hedge_sma_len": [5, 20],
+                         "long_hedge_sma_len": [0, 20],
                          "long_hedge_fall_pct": [0.01, 0.40],
                          "long_hedge_sl_pct": [0.005, 0.1],
                          "long_hedge_t_sl_to_be_minutes": [5, 120],
-                         "long_hedge_max_duration_minutes": [20160, 20160],
+                         "long_hedge_max_duration_minutes": [0, 20160],
 
                          "short_close_grid_markup_end": [0, 0],
                          "short_close_grid_markup_start": [0, 0],
