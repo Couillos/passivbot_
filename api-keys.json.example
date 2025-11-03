@@ -47,7 +47,16 @@
         "exchange": "lighter",
         "private_key": "your_ethereum_private_key",
         "wallet_address": "your_wallet_address_optional",
-        "account_index": 0,
-        "api_key_index": 2
+        "api_auth": "your_api_auth_token",
+        "web3_provider_url": "your_web3_provider_url",
+        "testnet": false
+    },
+    "lighter_testnet_01" : {
+        "exchange": "lighter",
+        "private_key": "your_testnet_ethereum_private_key",
+        "wallet_address": "your_testnet_wallet_address_optional",
+        "api_auth": "your_testnet_api_auth_token",
+        "web3_provider_url": "your_testnet_web3_provider_url",
+        "testnet": true
     }
 }

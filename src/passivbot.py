@@ -1848,14 +1848,25 @@ class Passivbot:
         else:
             symbols = [symbol]
         last_prices = await self.cm.get_last_prices(symbols, max_age_ms=600_000)
+        # Fallback: if prices are nan/0, try to fetch from tickers
+        if any(math.isnan(last_prices.get(s, float('nan'))) or last_prices.get(s, 0) == 0 for s in symbols):
+            try:
+                tickers = await self.fetch_tickers()
+                for symbol in symbols:
+                    if math.isnan(last_prices.get(symbol, float('nan'))) or last_prices.get(symbol, 0) == 0:
+                        if symbol in tickers and 'last' in tickers[symbol]:
+                            last_prices[symbol] = tickers[symbol]['last']
+            except Exception as e:
+                logging.error(f"Failed to fetch tickers for fallback: {e}")
         for symbol in symbols:
             try:
+                min_cost_from_qty = pbr.qty_to_cost(
+                    self.min_qtys[symbol],
+                    last_prices[symbol],
+                    self.c_mults[symbol],
+                )
                 self.effective_min_cost[symbol] = max(
-                    pbr.qty_to_cost(
-                        self.min_qtys[symbol],
-                        last_prices[symbol],
-                        self.c_mults[symbol],
-                    ),
+                    min_cost_from_qty,
                     self.min_costs[symbol],
                 )
             except Exception as e:
@@ -2887,6 +2898,10 @@ def setup_bot(config):
         from exchanges.kucoin import KucoinBot
 
         bot = KucoinBot(config)
+    elif user_info["exchange"] == "lighter":
+        from exchanges.lighter import LighterBot
+
+        bot = LighterBot(config)
     else:
         raise Exception(f"unknown exchange {user_info['exchange']}")
     return bot

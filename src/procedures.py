@@ -171,6 +171,9 @@ def load_user_info(user: str, api_keys_path="api-keys.json") -> dict:
             "is_vault",
             "api_auth",
             "web3_provider_url",
+            "testnet",
+            "account_index",
+            "api_key_index",
         ]
     }
 
@@ -200,8 +203,11 @@ def load_exchange_key_secret_passphrase(
 def load_broker_code(exchange: str) -> str:
     try:
         return hjson.load(open("broker_codes.hjson"))[exchange]
+    except KeyError:
+        print(f"failed to load broker code '{exchange}': exchange not found in broker_codes.hjson")
+        return ""
     except Exception as e:
-        print(f"failed to load broker code", e)
+        print(f"failed to load broker code '{exchange}':", e)
         traceback.print_exc()
         return ""
 

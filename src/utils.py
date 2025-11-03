@@ -209,6 +209,19 @@ async def load_markets(exchange: str, max_age_ms: int = 1000 * 60 * 60 * 24, ver
 
     # Fetch from exchange via ccxt
     cc = load_ccxt_instance(ex, enable_rate_limit=True)
+
+    # Special handling for non-CCXT exchanges
+    if cc is None:
+        if ex == "lighter":
+            # For Lighter, return a minimal markets dict
+            # The LighterBot will handle markets internally via its own SDK
+            markets = {}
+            if verbose:
+                logging.info(f"{ex} Using custom market loading (non-CCXT exchange)")
+            return markets
+        else:
+            raise RuntimeError(f"Exchange '{ex}' requires CCXT but instance is None")
+
     try:
         markets = await cc.load_markets(True)
     except Exception as e:
@@ -271,8 +284,17 @@ def load_ccxt_instance(exchange_id: str, enable_rate_limit: bool = True):
     Return a ccxt async-support exchange instance for the given exchange id.
 
     The returned instance should be closed by the caller with: await cc.close()
+
+    Returns None for exchanges that don't use CCXT (like Lighter).
     """
     ex = normalize_exchange_name(exchange_id)
+
+    # Special handling for exchanges not in CCXT
+    if ex == "lighter":
+        # Lighter doesn't use CCXT, return None
+        # Markets will be loaded differently for Lighter
+        return None
+
     try:
         cc = getattr(ccxt, ex)({"enableRateLimit": bool(enable_rate_limit)})
     except Exception:
@@ -291,7 +313,7 @@ def load_ccxt_instance(exchange_id: str, enable_rate_limit: bool = True):
 
 def get_quote(exchange):
     exchange = normalize_exchange_name(exchange)
-    return "USDC" if exchange in ["hyperliquid", "defx"] else "USDT"
+    return "USDC" if exchange in ["hyperliquid", "defx", "lighter"] else "USDT"
 
 
 def remove_powers_of_ten(text):
