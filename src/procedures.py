@@ -169,6 +169,8 @@ def load_user_info(user: str, api_keys_path="api-keys.json") -> dict:
             "wallet_address",
             "private_key",
             "is_vault",
+            "api_auth",
+            "web3_provider_url",
         ]
     }
 

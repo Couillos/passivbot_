@@ -7,7 +7,8 @@
         "gateio": "https://www.gate.io/signup/AQCRUVTE",
         "hyperliquid": "https://app.hyperliquid.xyz/join/PASSIVBOT",
         "defx": "https://app.defx.com/join/4DKR14",
-        "kucoin": "https://www.kucoin.com/r/rf/CX8Q6DUF"
+        "kucoin": "https://www.kucoin.com/r/rf/CX8Q6DUF",
+        "lighter": "https://app.lighter.xyz"
     },
     "binance_01" : {
         "exchange": "binance",
@@ -41,5 +42,12 @@
         "exchange": "gateio",
         "key": "key",
         "secret": "secret"
+    },
+    "lighter_01" : {
+        "exchange": "lighter",
+        "private_key": "your_ethereum_private_key",
+        "wallet_address": "your_wallet_address_optional",
+        "account_index": 0,
+        "api_key_index": 2
     }
 }
