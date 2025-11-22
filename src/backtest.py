@@ -397,6 +397,9 @@ async def prepare_hlcvs_mss(config, exchange):
         logging.info(f"Unable to load hlcvs data from cache: {e}. Fetching...")
     if exchange == "combined":
         mss, timestamps, hlcvs, btc_usd_prices = await prepare_hlcvs_combined(config)
+    elif exchange == "custom":
+        from custom_exchange import prepare_custom_hlcvs
+        mss, timestamps, hlcvs, btc_usd_prices = await prepare_custom_hlcvs(config)
     else:
         mss, timestamps, hlcvs, btc_usd_prices = await prepare_hlcvs(config, exchange)
     coins = sorted([coin for coin in mss.keys() if not coin.startswith("__")])
@@ -583,14 +586,14 @@ def post_process(
     exchange,
 ):
     sts = utc_ms()
-    equities = pd.Series(equities)
-    equities_btc = pd.Series(equities_btc)
+    equities_series = pd.Series(equities)
+    equities_btc_series = pd.Series(equities_btc)
     fdf, analysis_py, bal_eq = process_forager_fills(
         fills,
         require_config_value(config, f"backtest.coins.{exchange}"),
         hlcvs,
-        equities,
-        equities_btc,
+        equities_series,
+        equities_btc_series,
     )
     for k in analysis_py:
         if k not in analysis:
@@ -610,8 +613,10 @@ def post_process(
         config,
         exchange,
         fdf,
-        bal_eq,
+        equities,
+        equities_btc,
         hlcvs,
+        analysis,
     )
 
 
@@ -620,23 +625,82 @@ def plot_forager(
     config: dict,
     exchange: str,
     fdf: pd.DataFrame,
-    bal_eq,
+    equities,
+    equities_btc,
     hlcvs,
+    analysis,
 ):
     plots_dir = make_get_filepath(oj(results_path, "fills_plots", ""))
     plt.clf()
-    bal_eq[["balance", "equity"]].plot(logy=False)
-    plt.savefig(oj(results_path, "balance_and_equity.png"))
-    plt.clf()
-    bal_eq[["balance", "equity"]].plot(logy=True)
-    plt.savefig(oj(results_path, "balance_and_equity_logy.png"))
+    plt.style.use("dark_background")
+    plt.rcParams['figure.facecolor'] = '#121212'
+    plt.rcParams['axes.facecolor'] = '#121212'
+    plt.rcParams['grid.color'] = '#444444'
+    plt.rcParams['text.color'] = 'white'
+    plt.rcParams['axes.labelcolor'] = 'white'
+    plt.rcParams['xtick.color'] = 'white'
+    plt.rcParams['ytick.color'] = 'white'
+
+    plt.figure(figsize=(29, 18))
+    ax = plt.gca()
+
+    # Create high-resolution data for plotting (1-minute resolution)
+    bdf_plot = fdf.groupby(fdf.minute).balance.last()
+    edf_plot = pd.Series(equities)
+    ebdf_plot = pd.Series(equities_btc)
+
+    # Build data dict with full resolution
+    data_dict = {"balance": bdf_plot, "equity": edf_plot, "balance_btc": ebdf_plot, "equity_btc": ebdf_plot}
+
+    # Create unified index
+    if len(bdf_plot) > 0 and len(edf_plot) > 0:
+        min_idx = min(bdf_plot.index[0], edf_plot.index[0])
+        max_idx = max(bdf_plot.index[-1], edf_plot.index[-1])
+        full_idx = np.arange(min_idx, max_idx + 1, 1)
+        bal_eq_plot = pd.DataFrame(data_dict, index=full_idx).astype(float).ffill().bfill()
+    else:
+        bal_eq_plot = pd.DataFrame(data_dict).astype(float).ffill().bfill()
+
+    plt.plot(bal_eq_plot.index, bal_eq_plot["balance"], zorder=2)
+    plt.plot(bal_eq_plot.index, bal_eq_plot["equity"], zorder=2)
+
+    plt.grid()
+
+    # Build metrics list
+    metrics = [
+        ("adg", analysis.get("adg")),
+        ("mdg", analysis.get("mdg")),
+        ("gain", analysis.get("gain")),
+        ("grid_size", analysis.get("minimum_long_grid_size")),
+        ("nb_entries", analysis.get("nb_entries")),
+        ("drawdown_worst", analysis.get("drawdown_worst")),
+        ("drawdown_worst_mean_1pct", analysis.get("drawdown_worst_mean_1pct")),
+        ("loss_profit_ratio", analysis.get("loss_profit_ratio")),
+        ("sortino_ratio", analysis.get("sortino_ratio")),
+        ("calmar_ratio", analysis.get("calmar_ratio")),
+        ("sterling_ratio", analysis.get("sterling_ratio")),
+        ("sharpe_ratio", analysis.get("sharpe_ratio")),
+        ("omega_ratio", analysis.get("omega_ratio")),
+        ("ulcer_index", analysis.get("ulcer_index")),
+        ("equity_balance_diff_neg_mean", analysis.get("equity_balance_diff_neg_mean")),
+        ("position_held_hours_max", analysis.get("position_held_hours_max")),
+        ("position_held_hours_mean", analysis.get("position_held_hours_mean")),
+        ("position_held_hours_median", analysis.get("position_held_hours_median")),
+        ("position_unchanged_hours_max", analysis.get("position_unchanged_hours_max")),
+        ("positions_held_per_day", analysis.get("positions_held_per_day")),
+    ]
+
+    metrics_text = "\n".join([f"{k}: {v:.6g}" if v is not None else f"{k}: -" for k, v in metrics])
+    ax.text(0.006, 0.9914, metrics_text, fontsize=18, color="white", va="top", ha="left", family="monospace", transform=ax.transAxes, bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
+
+    plt.savefig(oj(results_path, "balance_and_equity.png"), bbox_inches='tight')
     plt.clf()
     if bool(require_config_value(config, "backtest.use_btc_collateral")):
         plt.clf()
-        bal_eq[["balance_btc", "equity_btc"]].plot(logy=False)
+        bal_eq_plot[["balance_btc", "equity_btc"]].plot(logy=False)
         plt.savefig(oj(results_path, "balance_and_equity_btc.png"))
         plt.clf()
-        bal_eq[["balance_btc", "equity_btc"]].plot(logy=True)
+        bal_eq_plot[["balance_btc", "equity_btc"]].plot(logy=True)
         plt.savefig(oj(results_path, "balance_and_equity_btc_logy.png"))
 
     if not config["disable_plotting"]:
@@ -690,9 +754,12 @@ async def main():
     config = format_config(config, verbose=False)
     backtest_exchanges = require_config_value(config, "backtest.exchanges")
     for ex in backtest_exchanges:
-        await load_markets(ex)
+        if ex != "custom":
+            await load_markets(ex)
     config = parse_overrides(config, verbose=True)
-    await format_approved_ignored_coins(config, backtest_exchanges)
+    # Skip format_approved_ignored_coins for custom exchange
+    if "custom" not in backtest_exchanges:
+        await format_approved_ignored_coins(config, backtest_exchanges)
     config["disable_plotting"] = args.disable_plotting
     config["backtest"]["cache_dir"] = {}
     config["backtest"]["coins"] = {}

@@ -593,7 +593,10 @@ class OHLCVManager:
             await self.load_markets()
         if not self.has_coin(coin):
             return
-        if self.exchange == "binanceusdm":
+        if self.exchange == "custom":
+            # For custom exchange, data is already pre-loaded, nothing to download
+            return
+        elif self.exchange == "binanceusdm":
             await self.download_ohlcvs_binance(coin)
         elif self.exchange == "bybit":
             await self.download_ohlcvs_bybit(coin)
@@ -624,7 +627,11 @@ class OHLCVManager:
         if not self.has_coin(coin):
             self.dump_first_timestamp(coin, 0.0)
             return 0.0
-        if self.exchange == "binanceusdm":
+        if self.exchange == "custom":
+            # For custom exchange, find first timestamp from cached files
+            fts = await self.find_first_day_custom(coin)
+            return fts
+        elif self.exchange == "binanceusdm":
             # Fetches first by default
             ohlcvs = await self.cc.fetch_ohlcv(self.get_symbol(coin), since=1, timeframe="1d")
         elif self.exchange == "bybit":
@@ -654,6 +661,9 @@ class OHLCVManager:
 
     def load_cc(self):
         if self.cc is None:
+            if self.exchange == "custom":
+                # Custom exchange doesn't use ccxt
+                return
             self.cc = getattr(ccxt, self.exchange)({"enableRateLimit": True})
             self.cc.options["defaultType"] = "swap"
 
@@ -1280,6 +1290,40 @@ class OHLCVManager:
                 logging.info(f"{self.exchange} Dumped {fpath}")
         except Exception as e:
             logging.error(f"Error with {get_function_name()} {e}")
+
+    async def find_first_day_custom(self, coin: str) -> float:
+        """Find first day where data is available for a given coin on custom exchange"""
+        if fts := self.load_first_timestamp(coin):
+            return fts
+
+        # Check if data directory exists
+        dirpath = os.path.join(self.cache_filepaths["ohlcvs"], coin, "")
+        if not os.path.exists(dirpath):
+            fts = 0.0
+            self.dump_first_timestamp(coin, fts)
+            return fts
+
+        # Get all .npy files and find the earliest
+        all_files = sorted([f for f in os.listdir(dirpath) if f.endswith(".npy")])
+        if not all_files:
+            fts = 0.0
+            self.dump_first_timestamp(coin, fts)
+            return fts
+
+        # First file should be the earliest (files are named YYYY-MM-DD.npy)
+        first_file = all_files[0]
+        first_date_str = first_file.replace(".npy", "")
+        try:
+            fts = date_to_ts(first_date_str)
+            self.dump_first_timestamp(coin, fts)
+            if self.verbose:
+                logging.info(f"custom: found first day for {coin}: {first_date_str}")
+            return fts
+        except Exception as e:
+            logging.error(f"custom: error parsing date from {first_file}: {e}")
+            fts = 0.0
+            self.dump_first_timestamp(coin, fts)
+            return fts
 
 
 async def prepare_hlcvs(config: dict, exchange: str):

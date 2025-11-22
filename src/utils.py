@@ -212,12 +212,22 @@ async def load_markets(exchange: str, max_age_ms: int = 1000 * 60 * 60 * 24, ver
 
     # Special handling for non-CCXT exchanges
     if cc is None:
-        if ex == "lighter":
-            # For Lighter, return a minimal markets dict
-            # The LighterBot will handle markets internally via its own SDK
+        if ex in ["lighter", "custom"]:
+            # For these exchanges, load markets from cache or return minimal dict
+            # They handle markets internally via custom logic
+            try:
+                if os.path.exists(markets_path):
+                    with open(markets_path, "r") as f:
+                        markets = json.load(f)
+                    if verbose:
+                        logging.info(f"{ex} Loaded markets from cache (non-CCXT exchange)")
+                    create_coin_symbol_map_cache(ex, markets, verbose=verbose)
+                    return markets
+            except Exception as e:
+                logging.error(f"Error loading markets from cache for {ex}: {e}")
             markets = {}
             if verbose:
-                logging.info(f"{ex} Using custom market loading (non-CCXT exchange)")
+                logging.info(f"{ex} Using empty markets dict (non-CCXT exchange)")
             return markets
         else:
             raise RuntimeError(f"Exchange '{ex}' requires CCXT but instance is None")
@@ -260,6 +270,11 @@ def normalize_exchange_name(exchange: str) -> str:
     new exchanges that follow common suffix patterns like 'usdm' or 'futures'.
     """
     ex = (exchange or "").lower()
+
+    # Special handling for custom exchange (traditional stock data)
+    if ex == "custom":
+        return "custom"
+
     valid = set(getattr(ccxt, "exchanges", []))
 
     # Explicit mapping for known special case
@@ -285,14 +300,14 @@ def load_ccxt_instance(exchange_id: str, enable_rate_limit: bool = True):
 
     The returned instance should be closed by the caller with: await cc.close()
 
-    Returns None for exchanges that don't use CCXT (like Lighter).
+    Returns None for exchanges that don't use CCXT (like Lighter or custom).
     """
     ex = normalize_exchange_name(exchange_id)
 
     # Special handling for exchanges not in CCXT
-    if ex == "lighter":
-        # Lighter doesn't use CCXT, return None
-        # Markets will be loaded differently for Lighter
+    if ex in ["lighter", "custom"]:
+        # These exchanges don't use CCXT, return None
+        # Markets will be loaded differently
         return None
 
     try:
@@ -313,6 +328,8 @@ def load_ccxt_instance(exchange_id: str, enable_rate_limit: bool = True):
 
 def get_quote(exchange):
     exchange = normalize_exchange_name(exchange)
+    if exchange == "custom":
+        return "USD"
     return "USDC" if exchange in ["hyperliquid", "defx", "lighter"] else "USDT"
 
 

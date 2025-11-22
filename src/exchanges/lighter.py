@@ -3,6 +3,7 @@ from uuid import uuid4
 import asyncio
 import traceback
 import json
+import time
 import numpy as np
 import passivbot_rust as pbr
 from utils import ts_to_date, utc_ms
@@ -78,6 +79,8 @@ class LighterBot(Passivbot):
         """
         self.ws_enabled = False
         self.ccp = None
+        # Set cca to self so CandlestickManager can call fetch_ohlcv on this bot instance
+        self.cca = self
 
         # Get credentials
         if hasattr(self, 'user_info') and self.user_info:
@@ -130,8 +133,8 @@ class LighterBot(Passivbot):
             self.order_api = lighter.OrderApi(self.api_client)
             self.transaction_api = lighter.TransactionApi(self.api_client)
             
-            # Verify connection
-            err = self.signer_client.check_client()
+            # Verify connection (synchronous SDK call wrapped in async)
+            err = await asyncio.to_thread(self.signer_client.check_client)
             if err:
                 raise Exception(f"SignerClient check failed: {err}")
             
@@ -180,7 +183,7 @@ class LighterBot(Passivbot):
                     "cost": {"min": 10.0, "max": None},
                     "leverage": {"min": 1, "max": 50}
                 },
-                "info": {"maxLeverage": 50, "market_index": 0}
+                "info": {"maxLeverage": 50, "market_index": 1}
             },
             "ETH/USDC:USDC": {
                 "id": "WETH-USDC",
@@ -202,10 +205,9 @@ class LighterBot(Passivbot):
                     "cost": {"min": 10.0, "max": None},
                     "leverage": {"min": 1, "max": 50}
                 },
-                "info": {"maxLeverage": 50, "market_index": 1}
+                "info": {"maxLeverage": 50, "market_index": 0}
             }
         }
-        
         if verbose:
             logging.info(f"Lighter: Initialized with {len(self.markets_dict)} markets")
         
@@ -277,17 +279,27 @@ class LighterBot(Passivbot):
             tickers = {}
             for symbol in self.markets_dict:
                 try:
-                    orderbook_symbol = self._symbol_to_orderbook_id(symbol)
+                    # Get market info to extract market_id
+                    market_info = self.markets_dict[symbol]
+                    market_id = market_info['info']['market_index']
                     
-                    # Fetch latest 1-minute candle
-                    candles = await self.candlestick_api.candlestick(
-                        orderbook_symbol=orderbook_symbol,
-                        interval='1m',
-                        limit=1
+                    # Calculate time range for latest candle (last 2 minutes to be safe)
+                    # Lighter API expects timestamps in SECONDS
+                    now_sec = int(time.time())
+                    start_timestamp = now_sec - (2 * 60)  # 2 minutes ago
+                    end_timestamp = now_sec
+
+                    # Fetch latest 1-minute candle using correct API (async SDK call)
+                    candles = await self.candlestick_api.candlesticks(
+                        market_id=market_id,
+                        resolution='1m',
+                        start_timestamp=start_timestamp,
+                        end_timestamp=end_timestamp,
+                        count_back=1
                     )
                     
-                    if candles and hasattr(candles, 'candles') and len(candles.candles) > 0:
-                        latest = candles.candles[0]
+                    if candles and hasattr(candles, 'candlesticks') and len(candles.candlesticks) > 0:
+                        latest = candles.candlesticks[-1]  # Get most recent candle
                         close_price = float(latest.close)
                         high_price = float(latest.high)
                         low_price = float(latest.low)
@@ -316,18 +328,18 @@ class LighterBot(Passivbot):
         await self._init_lighter_clients()
         
         try:
-            # Create auth token for API calls
+            # Create auth token for API calls (synchronous SignerClient call - not async)
             auth, err = self.signer_client.create_auth_token_with_expiry()
             if err:
                 raise Exception(f"Failed to create auth token: {err}")
-            
+
             open_orders = []
             symbols_to_fetch = [symbol] if symbol else list(self.markets_dict.keys())
-            
+
             for sym in symbols_to_fetch:
                 market_index = self._get_market_index(sym)
-                
-                # Fetch active orders for this market
+
+                # Fetch active orders for this market (async SDK call)
                 orders = await self.order_api.account_active_orders(
                     account_index=self.account_index,
                     market_id=market_index,
@@ -357,12 +369,12 @@ class LighterBot(Passivbot):
         await self._init_lighter_clients()
         
         try:
-            # Create auth token
+            # Create auth token (synchronous SignerClient call - not async)
             auth, err = self.signer_client.create_auth_token_with_expiry()
             if err:
                 raise Exception(f"Failed to create auth token: {err}")
-            
-            # Fetch account info - pass auth via headers
+
+            # Fetch account info - pass auth via headers (async SDK call)
             account_info = await self.account_api.account(
                 by="index",
                 value=str(self.account_index),
@@ -409,7 +421,7 @@ class LighterBot(Passivbot):
         except Exception as e:
             logging.error(f"Error fetching positions: {e}")
             traceback.print_exc()
-            return []
+            return [], 0.0
 
     async def fetch_ohlcv(self, symbol: str, timeframe="1m"):
         """Fetch OHLCV candles from Lighter"""
@@ -419,10 +431,11 @@ class LighterBot(Passivbot):
             if not hasattr(self, 'candlestick_api'):
                 self.candlestick_api = lighter.CandlestickApi(self.api_client)
             
-            orderbook_symbol = self._symbol_to_orderbook_id(symbol)
+            market_info = self.markets_dict[symbol]
+            market_id = market_info['info']['market_index']
             
-            # Map timeframe to Lighter interval
-            interval_map = {
+            # Map timeframe to Lighter resolution
+            resolution_map = {
                 "1m": "1m",
                 "3m": "3m",
                 "5m": "5m",
@@ -436,20 +449,40 @@ class LighterBot(Passivbot):
                 "1d": "1d",
                 "1w": "1w"
             }
-            interval = interval_map.get(timeframe, "1m")
+            resolution = resolution_map.get(timeframe, "1m")
             
-            candles = await self.candlestick_api.candlestick(
-                orderbook_symbol=orderbook_symbol,
-                interval=interval,
-                limit=1000
+            # Get time range for historical candles
+            now_ms = utc_ms()
+            end_timestamp = int(now_ms / 1000)  # Convert to seconds
+            
+            # Calculate start time based on timeframe
+            timeframe_seconds = {
+                "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+                "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600,
+                "12h": 43200, "1d": 86400, "1w": 604800
+            }
+            seconds_per_candle = timeframe_seconds.get(timeframe, 60)
+            start_timestamp = end_timestamp - (1000 * seconds_per_candle)
+            
+            logging.info(f"DEBUG fetch_ohlcv: {symbol} market_id={market_id}, resolution={resolution}, requesting 1000 candles")
+
+            candles = await self.candlestick_api.candlesticks(
+                market_id=market_id,
+                resolution=resolution,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+                count_back=1000
             )
             
-            if not candles or not hasattr(candles, 'candles'):
+            if not candles or not hasattr(candles, 'candlesticks'):
+                logging.warning(f"DEBUG fetch_ohlcv: No candles returned for {symbol}")
                 return []
+            
+            logging.info(f"DEBUG fetch_ohlcv: Got {len(candles.candlesticks)} candles for {symbol}")
             
             # Convert to OHLCV format [timestamp, open, high, low, close, volume]
             result = []
-            for candle in candles.candles:
+            for candle in candles.candlesticks:
                 result.append([
                     int(candle.timestamp) * 1000,  # Convert to ms
                     float(candle.open),
@@ -465,11 +498,248 @@ class LighterBot(Passivbot):
             traceback.print_exc()
             return []
 
-    async def fetch_ohlcvs_1m(self, symbol: str, limit=None):
-        """Fetch 1-minute candles"""
+    async def fetch_ohlcvs_1m(self, symbol: str, since: float = None, limit=None):
+        """Fetch 1-minute candles with optional since timestamp"""
         n_candles_limit = 1000 if limit is None else limit
-        result = await self.fetch_ohlcv(symbol, timeframe="1m")
-        return result[:n_candles_limit] if result else []
+
+        await self._init_lighter_clients()
+        
+        try:
+            if not hasattr(self, 'candlestick_api'):
+                self.candlestick_api = lighter.CandlestickApi(self.api_client)
+            
+            market_info = self.markets_dict[symbol]
+            market_id = market_info['info']['market_index']
+            
+            # Calculate time range
+            now_ms = utc_ms()
+            end_timestamp = int(now_ms / 1000)  # Convert to seconds
+            
+            if since is not None:
+                # Fetch from 'since' timestamp up to now
+                since = since // 60000 * 60000  # Round to minute
+                start_timestamp = int(since / 1000)  # Convert ms to seconds
+
+                # Fetch in batches if needed
+                max_n_fetches = 5000 // n_candles_limit
+                all_fetched = []
+                
+                for i in range(max_n_fetches):
+                    candles = await self.candlestick_api.candlesticks(
+                        market_id=market_id,
+                        resolution='1m',
+                        start_timestamp=start_timestamp,
+                        end_timestamp=end_timestamp,
+                        count_back=n_candles_limit
+                    )
+                    
+                    if not candles or not hasattr(candles, 'candlesticks') or len(candles.candlesticks) == 0:
+                        break
+                    
+                    # Convert to OHLCV format
+                    for candle in candles.candlesticks:
+                        all_fetched.append([
+                            int(candle.timestamp),  # Already in ms from API
+                            float(candle.open),
+                            float(candle.high),
+                            float(candle.low),
+                            float(candle.close),
+                            float(candle.volume0) if hasattr(candle, 'volume0') else 0.0
+                        ])
+                    
+                    if len(candles.candlesticks) < n_candles_limit:
+                        break
+                    
+                    # Update start_timestamp for next batch (convert ms to seconds)
+                    start_timestamp = int(candles.candlesticks[-1].timestamp / 1000)
+
+                return all_fetched
+            else:
+                # No 'since' provided, fetch most recent candles
+                start_timestamp = end_timestamp - (n_candles_limit * 60)
+
+                candles = await self.candlestick_api.candlesticks(
+                    market_id=market_id,
+                    resolution='1m',
+                    start_timestamp=start_timestamp,
+                    end_timestamp=end_timestamp,
+                    count_back=n_candles_limit
+                )
+
+                if not candles or not hasattr(candles, 'candlesticks'):
+                    return []
+
+                result = []
+                for candle in candles.candlesticks:
+                    result.append([
+                        int(candle.timestamp),  # Already in ms from API
+                        float(candle.open),
+                        float(candle.high),
+                        float(candle.low),
+                        float(candle.close),
+                        float(candle.volume0) if hasattr(candle, 'volume0') else 0.0
+                    ])
+
+                return result[:n_candles_limit]
+                
+        except Exception as e:
+            logging.error(f"Error fetching OHLCV 1m for {symbol}: {e}")
+            traceback.print_exc()
+            return []
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = '1m', since: int = None, limit: int = None, params: dict = None):
+        """
+        CCXT-compatible wrapper for fetch_ohlcvs_1m.
+        Called by CandlestickManager's _ccxt_fetch_ohlcv_once.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTC/USDC:USDC')
+            timeframe: Candle timeframe (only '1m' supported for now)
+            since: Timestamp in milliseconds
+            limit: Max number of candles to fetch
+            params: Additional parameters (contains 'until' for end timestamp)
+
+        Returns:
+            List of OHLCV arrays: [[timestamp_ms, open, high, low, close, volume], ...]
+        """
+        if timeframe != '1m':
+            logging.warning(f"Lighter only supports 1m timeframe, got {timeframe}")
+            return []
+
+        return await self.fetch_ohlcvs_1m(symbol, since=since, limit=limit)
+
+    async def get_first_timestamp_iteratively(self, symbol):
+        """Find the earliest available candle for a Lighter market using binary search.
+        
+        Similar to Bitget's approach, we binary search backwards to find when data starts.
+        Returns the timestamp in milliseconds of the first available candle.
+        """
+        DAY_MS = 86_400_000
+        WEEK_MS = 7 * DAY_MS
+        
+        try:
+            await self._init_lighter_clients()
+            
+            if not hasattr(self, 'candlestick_api'):
+                self.candlestick_api = lighter.CandlestickApi(self.api_client)
+            
+            market_info = self.markets_dict.get(symbol)
+            if not market_info:
+                logging.warning(f"Market {symbol} not found in markets_dict")
+                return utc_ms() - WEEK_MS
+            
+            market_id = market_info['info']['market_index']
+            
+            # For testnet with limited history, use a simpler approach
+            # Try fetching from progressively earlier dates
+            now_sec = int(utc_ms() / 1000)
+            
+            # Try different time ranges: 7 days, 14 days, 30 days, 60 days, 90 days
+            test_periods = [7, 14, 30, 60, 90, 180, 365]
+            earliest_ts_ms = None
+            
+            for days_ago in test_periods:
+                try:
+                    start_ts_sec = now_sec - (days_ago * 24 * 60 * 60)
+                    end_ts_sec = start_ts_sec + (7 * 24 * 60 * 60)  # +7 days window
+
+                    candles = await self.candlestick_api.candlesticks(
+                        market_id=market_id,
+                        resolution='1d',
+                        start_timestamp=start_ts_sec,
+                        end_timestamp=end_ts_sec,
+                        count_back=10
+                    )
+                    
+                    if candles and hasattr(candles, 'candlesticks') and len(candles.candlesticks) > 0:
+                        # Found data at this point
+                        raw_timestamp = candles.candlesticks[0].timestamp
+                        logging.debug(f"Raw timestamp from Lighter API: {raw_timestamp} (type: {type(raw_timestamp)})")
+                        
+                        # The Lighter API might return timestamps in milliseconds already
+                        # Check if it's likely in seconds (< year 2100 in seconds) or milliseconds
+                        if raw_timestamp < 4102444800:  # Year 2100 in seconds
+                            # Timestamp is in seconds, convert to milliseconds
+                            first_candle_ts_ms = int(raw_timestamp) * 1000
+                        else:
+                            # Timestamp is already in milliseconds
+                            first_candle_ts_ms = int(raw_timestamp)
+                        
+                        earliest_ts_ms = first_candle_ts_ms
+                        logging.debug(f"Found data for {symbol} at {days_ago} days ago: {ts_to_date(first_candle_ts_ms)}")
+                    else:
+                        # No data at this point, so we've gone too far back
+                        break
+                        
+                except Exception as e:
+                    logging.debug(f"Error fetching at {days_ago} days ago: {e}")
+                    break
+            
+            if earliest_ts_ms:
+                logging.info(f"Found first timestamp for {symbol}: {earliest_ts_ms} ({ts_to_date(earliest_ts_ms)})")
+                return earliest_ts_ms
+            else:
+                # Fallback to 7 days ago if nothing found
+                logging.warning(f"No historical data found for {symbol}, using 7 days ago as fallback")
+                return utc_ms() - WEEK_MS
+            
+        except Exception as e:
+            logging.error(f"Error finding first timestamp for {symbol}: {e}")
+            traceback.print_exc()
+            # Fallback to 7 days ago
+            return utc_ms() - WEEK_MS
+    
+    def get_first_timestamp(self, symbol):
+        """Return the cached first tradable timestamp for symbol.
+        
+        This is called synchronously, so it returns from the cache.
+        The actual fetching is done by update_first_timestamps().
+        """
+        if symbol not in self.first_timestamps:
+            logging.warning(f"{symbol} missing from first_timestamps cache. Setting to zero.")
+            self.first_timestamps[symbol] = 0.0
+        return self.first_timestamps[symbol]
+    
+    async def update_first_timestamps(self, symbols=[]):
+        """Override to use Lighter-specific binary search method for first timestamps.
+        
+        Instead of using get_first_timestamps_unified(), we use our own binary search
+        since Lighter is not in that function.
+        """
+        from pure_funcs import flatten
+        
+        if not hasattr(self, "first_timestamps"):
+            self.first_timestamps = {}
+        
+        # Get all symbols we need to check
+        symbols = sorted(set(symbols + flatten(self.approved_coins_minus_ignored_coins.values())))
+        
+        # Check which symbols are missing
+        missing_symbols = [s for s in symbols if s not in self.first_timestamps]
+        
+        if not missing_symbols:
+            logging.info("All first timestamps already cached")
+            return
+        
+        logging.info(f"Fetching first timestamps for {len(missing_symbols)} Lighter symbols using binary search")
+        
+        # Fetch first timestamps using our binary search method
+        for symbol in missing_symbols:
+            try:
+                first_ts = await self.get_first_timestamp_iteratively(symbol)
+                self.first_timestamps[symbol] = first_ts
+                logging.info(f"Cached first timestamp for {symbol}: {first_ts} ({ts_to_date(first_ts)})")
+            except Exception as e:
+                logging.error(f"Failed to get first timestamp for {symbol}: {e}")
+                self.first_timestamps[symbol] = 0.0
+        
+        # Also handle coin-to-symbol mappings
+        for symbol in sorted(self.first_timestamps):
+            symbolf = self.coin_to_symbol(symbol, verbose=False)
+            if symbolf not in self.markets_dict:
+                continue
+            if symbolf not in self.first_timestamps:
+                self.first_timestamps[symbolf] = self.first_timestamps[symbol]
 
     async def fetch_pnls(self, start_time=None, limit=None):
         """Fetch PnL history from Lighter"""
@@ -480,21 +750,24 @@ class LighterBot(Passivbot):
     async def execute_order(self, order: dict) -> dict:
         """Execute an order on Lighter"""
         await self._init_lighter_clients()
-        
+
         try:
             symbol = order["symbol"]
             market_index = self._get_market_index(symbol)
-            
+
+            # Get quantity from order (base class passes "qty")
+            qty = abs(float(order.get("qty", order.get("amount", 0))))
+
             # Convert amount and price to Lighter format (integer with scaling)
-            base_amount = int(order["amount"] * 10000)  # Scale to 4 decimals
+            base_amount = int(qty * 10000)  # Scale to 4 decimals
             price = int(order["price"] * 100)  # Scale to 2 decimals
             
             is_ask = 1 if order["side"] == "sell" else 0
             
             # Generate unique client_order_index
             client_order_index = int(utc_ms()) % 1000000000
-            
-            # Create order using SignerClient
+
+            # Create order using SignerClient (async SDK call)
             tx, tx_hash, err = await self.signer_client.create_order(
                 market_index=market_index,
                 client_order_index=client_order_index,
@@ -514,7 +787,7 @@ class LighterBot(Passivbot):
                 "symbol": symbol,
                 "id": str(client_order_index),
                 "price": order["price"],
-                "amount": order["amount"],
+                "amount": qty,
                 "side": order["side"],
                 "type": "limit",
                 "timestamp": utc_ms()
@@ -532,8 +805,8 @@ class LighterBot(Passivbot):
             symbol = order["symbol"]
             market_index = self._get_market_index(symbol)
             order_index = int(order["id"])
-            
-            # Cancel order using SignerClient
+
+            # Cancel order using SignerClient (async SDK call)
             tx, tx_hash, err = await self.signer_client.cancel_order(
                 market_index=market_index,
                 order_index=order_index
