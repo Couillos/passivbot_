@@ -272,6 +272,20 @@ fn extract_bool_value(dict: &PyDict, key: &str) -> PyResult<bool> {
     }
 }
 
+fn extract_string_value(dict: &PyDict, key: &str) -> PyResult<String> {
+    dict.get_item(key)
+        .map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Key '{}' not found", key))
+        })?
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Key '{}' has None value",
+                key
+            ))
+        })?
+        .extract::<String>()
+}
+
 fn extract_grid_spacing_we_weight(dict: &PyDict) -> PyResult<f64> {
     if let Some(obj) = dict.get_item("entry_grid_spacing_we_weight")? {
         obj.extract::<f64>()
@@ -327,14 +341,34 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
             let val: f64 = extract_value(dict, "hedge_sma_len").unwrap_or(10.0);
             val.round() as usize
         },
-        hedge_fall_pct: extract_value(dict, "hedge_fall_pct").unwrap_or(0.20),
-        hedge_sl_pct: extract_value(dict, "hedge_sl_pct").unwrap_or(0.008),
-        hedge_t_sl_to_be_minutes: {
-            let val: f64 = extract_value(dict, "hedge_t_sl_to_be_minutes").unwrap_or(30.0);
-            val.round() as usize
-        },
         hedge_max_duration_minutes: {
             let val: f64 = extract_value(dict, "hedge_max_duration_minutes").unwrap_or(0.0);
+            val.round() as usize
+        },
+        // ATR-based hedging parameters
+        hedge_entry_mode: extract_string_value(dict, "hedge_entry_mode")
+            .unwrap_or_else(|_| "atr_only".to_string()),
+        hedge_exit_mode: extract_string_value(dict, "hedge_exit_mode")
+            .unwrap_or_else(|_| "standard".to_string()),
+        hedge_atr_period: {
+            let val: f64 = extract_value(dict, "hedge_atr_period").unwrap_or(14.0);
+            val.round() as usize
+        },
+        hedge_distance_atr_trigger: extract_value(dict, "hedge_distance_atr_trigger").unwrap_or(3.0),
+        hedge_stop_loss_atr: extract_value(dict, "hedge_stop_loss_atr").unwrap_or(2.0),
+        hedge_breakeven_atr: extract_value(dict, "hedge_breakeven_atr").unwrap_or(1.0),
+        hedge_min_exposure_pct: extract_value(dict, "hedge_min_exposure_pct").unwrap_or(0.95),
+        hedge_min_exposure_pct_to_close: extract_value(dict, "hedge_min_exposure_pct_to_close").unwrap_or(0.90),
+        hedge_volatility_method: extract_string_value(dict, "hedge_volatility_method")
+            .unwrap_or_else(|_| "std".to_string()),
+        hedge_volatility_period: {
+            let val: f64 = extract_value(dict, "hedge_volatility_period").unwrap_or(20.0);
+            val.round() as usize
+        },
+        hedge_high_volatility_threshold: extract_value(dict, "hedge_high_volatility_threshold").unwrap_or(0.02),
+        hedge_normal_volatility_threshold: extract_value(dict, "hedge_normal_volatility_threshold").unwrap_or(0.01),
+        hedge_roc_period: {
+            let val: f64 = extract_value(dict, "hedge_roc_period").unwrap_or(1.0);
             val.round() as usize
         },
     })

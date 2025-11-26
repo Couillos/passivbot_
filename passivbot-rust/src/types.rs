@@ -129,10 +129,21 @@ pub struct BotParams {
     pub unstuck_threshold: f64,
     pub hedge_enabled: bool,
     pub hedge_sma_len: usize,
-    pub hedge_fall_pct: f64,
-    pub hedge_sl_pct: f64,
-    pub hedge_t_sl_to_be_minutes: usize,
     pub hedge_max_duration_minutes: usize,
+    // ATR-based hedging parameters
+    pub hedge_entry_mode: String,
+    pub hedge_exit_mode: String,
+    pub hedge_atr_period: usize,
+    pub hedge_distance_atr_trigger: f64,
+    pub hedge_stop_loss_atr: f64,
+    pub hedge_breakeven_atr: f64,
+    pub hedge_min_exposure_pct: f64,
+    pub hedge_min_exposure_pct_to_close: f64,
+    pub hedge_volatility_method: String,
+    pub hedge_volatility_period: usize,
+    pub hedge_high_volatility_threshold: f64,
+    pub hedge_normal_volatility_threshold: f64,
+    pub hedge_roc_period: usize,
 }
 
 #[derive(Debug)]
@@ -274,6 +285,8 @@ pub struct HedgePosition {
     pub entry_timestamp_minutes: u64, // Index k (in minutes from backtest start)
     pub sl_price: f64,
     pub sl_moved_to_be: bool,
+    pub long_position_price: f64,  // Precio promedio del long asociado
+    pub atr_at_entry: f64,          // ATR al momento de abrir hedge
 }
 
 #[derive(Debug, Clone)]
