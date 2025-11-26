@@ -661,8 +661,8 @@ def plot_forager(
     else:
         bal_eq_plot = pd.DataFrame(data_dict).astype(float).ffill().bfill()
 
-    plt.plot(bal_eq_plot.index, bal_eq_plot["balance"], zorder=2)
-    plt.plot(bal_eq_plot.index, bal_eq_plot["equity"], zorder=2)
+    plt.plot(bal_eq_plot.index, bal_eq_plot["balance"], linewidth=1.0, zorder=2)
+    plt.plot(bal_eq_plot.index, bal_eq_plot["equity"], linewidth=1.0, zorder=2)
 
     plt.grid()
 

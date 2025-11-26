@@ -360,6 +360,7 @@ async def prepare_custom_hlcvs(config: dict) -> tuple:
         raise ValueError(f"No data found for any coin between {start_date} and {end_date}")
 
     # Create unified timestamp array covering all coins
+    # Only include timestamps where at least one coin has data (no trading on weekends/nights)
     all_timestamps = []
     for df in coin_dataframes.values():
         all_timestamps.extend(df["timestamp"].values)
@@ -382,8 +383,8 @@ async def prepare_custom_hlcvs(config: dict) -> tuple:
     for coin_idx, coin in enumerate(sorted(coin_dataframes.keys())):
         df = coin_dataframes[coin]
 
-        # Reindex to match unified timestamps
-        df_indexed = df.set_index("timestamp").reindex(all_timestamps)
+        # Reindex to match unified timestamps and forward fill to extend last known values
+        df_indexed = df.set_index("timestamp").reindex(all_timestamps).ffill()
 
         # Fill HLCVS data [high, low, close, volume]
         hlcvs[:, coin_idx, 0] = df_indexed["high"].values
