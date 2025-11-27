@@ -3,6 +3,7 @@ mod backtest;
 mod closes;
 mod constants;
 mod entries;
+mod hedging;
 mod python;
 mod trailing_flip;
 mod types;

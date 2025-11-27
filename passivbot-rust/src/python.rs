@@ -8,8 +8,8 @@ use crate::entries::{
 };
 use crate::types::OrderType;
 use crate::types::{
-    BacktestParams, BotParams, BotParamsPair, EMABands, ExchangeParams, OrderBook, Position,
-    StateParams, TrailingPriceBundle,
+    BacktestParams, BotParams, BotParamsPair, EMABands, ExchangeParams, HedgeEntryMode,
+    HedgeExitMode, OrderBook, Position, StateParams, TrailingPriceBundle, VolatilityMethod,
 };
 use memmap::MmapOptions;
 use ndarray::{Array1, Array2, ArrayView};
@@ -323,20 +323,78 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
         unstuck_loss_allowance_pct: extract_value(dict, "unstuck_loss_allowance_pct")?,
         unstuck_threshold: extract_value(dict, "unstuck_threshold")?,
         hedge_enabled: extract_bool_value(dict, "hedge_enabled").unwrap_or(false),
-        hedge_sma_len: {
-            let val: f64 = extract_value(dict, "hedge_sma_len").unwrap_or(10.0);
+        // ATR parameters
+        hedge_atr_period: {
+            let val: f64 = extract_value(dict, "hedge_atr_period").unwrap_or(14.0);
             val.round() as usize
         },
-        hedge_fall_pct: extract_value(dict, "hedge_fall_pct").unwrap_or(0.20),
-        hedge_sl_pct: extract_value(dict, "hedge_sl_pct").unwrap_or(0.008),
-        hedge_t_sl_to_be_minutes: {
-            let val: f64 = extract_value(dict, "hedge_t_sl_to_be_minutes").unwrap_or(30.0);
+        hedge_distance_atr_trigger: extract_value(dict, "hedge_distance_atr_trigger").unwrap_or(3.0),
+        hedge_stop_loss_atr: extract_value(dict, "hedge_stop_loss_atr").unwrap_or(2.0),
+        hedge_breakeven_atr: extract_value(dict, "hedge_breakeven_atr").unwrap_or(1.0),
+        // Exposure (hysteresis)
+        hedge_min_exposure_pct: extract_value(dict, "hedge_min_exposure_pct").unwrap_or(0.95),
+        hedge_min_exposure_pct_to_close: extract_value(dict, "hedge_min_exposure_pct_to_close").unwrap_or(0.90),
+        // Modes
+        hedge_entry_mode: {
+            let mode: String = dict
+                .get_item("hedge_entry_mode")
+                .ok()
+                .flatten()
+                .and_then(|item| item.extract().ok())
+                .unwrap_or_else(|| "atr_only".to_string());
+            match mode.as_str() {
+                "volatility_only" => HedgeEntryMode::VolatilityOnly,
+                "atr_and_volatility" => HedgeEntryMode::AtrAndVolatility,
+                _ => HedgeEntryMode::AtrOnly,
+            }
+        },
+        hedge_exit_mode: {
+            let mode: String = dict
+                .get_item("hedge_exit_mode")
+                .ok()
+                .flatten()
+                .and_then(|item| item.extract().ok())
+                .unwrap_or_else(|| "standard".to_string());
+            match mode.as_str() {
+                "with_volatility" => HedgeExitMode::WithVolatility,
+                _ => HedgeExitMode::Standard,
+            }
+        },
+        // Volatility
+        hedge_volatility_method: {
+            let method: String = dict
+                .get_item("hedge_volatility_method")
+                .ok()
+                .flatten()
+                .and_then(|item| item.extract().ok())
+                .unwrap_or_else(|| "std".to_string());
+            match method.as_str() {
+                "roc" => VolatilityMethod::Roc,
+                _ => VolatilityMethod::Std,
+            }
+        },
+        hedge_volatility_period: {
+            let val: f64 = extract_value(dict, "hedge_volatility_period").unwrap_or(20.0);
             val.round() as usize
         },
-        hedge_max_duration_minutes: {
-            let val: f64 = extract_value(dict, "hedge_max_duration_minutes").unwrap_or(0.0);
+        hedge_high_volatility_threshold: extract_value(dict, "hedge_high_volatility_threshold").unwrap_or(0.02),
+        hedge_normal_volatility_threshold: extract_value(dict, "hedge_normal_volatility_threshold").unwrap_or(0.01),
+        hedge_roc_period: {
+            let val: f64 = extract_value(dict, "hedge_roc_period").unwrap_or(1.0);
             val.round() as usize
         },
+        // Anti-loop
+        hedge_max_operations_window: {
+            let val: f64 = extract_value(dict, "hedge_max_operations_window").unwrap_or(3.0);
+            val.round() as usize
+        },
+        hedge_operation_window_minutes: {
+            let val: f64 = extract_value(dict, "hedge_operation_window_minutes").unwrap_or(15.0);
+            val.round() as usize
+        },
+        // Incremental adjustment
+        hedge_enable_incremental_adjustment: extract_bool_value(dict, "hedge_enable_incremental_adjustment").unwrap_or(true),
+        hedge_size_tolerance_pct: extract_value(dict, "hedge_size_tolerance_pct").unwrap_or(0.005),
     })
 }
 
