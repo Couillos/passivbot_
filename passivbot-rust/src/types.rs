@@ -216,6 +216,10 @@ pub struct BotParams {
     // Incremental adjustment
     pub hedge_enable_incremental_adjustment: bool,
     pub hedge_size_tolerance_pct: f64,
+    // Risky exposure offload
+    pub twe_exposure_risky_threshold: f64,
+    pub twe_exposure_risky_offload: f64,
+    pub close_grid_markup_start_risky_offload_pct: f64,
 }
 
 #[derive(Debug)]
@@ -280,6 +284,9 @@ pub enum OrderType {
     ClosePanicLong = 22,
     ClosePanicShort = 23,
 
+    CloseRiskyExposureLong = 24,
+    CloseRiskyExposureShort = 25,
+
     Empty = 65535,
 }
 
@@ -312,6 +319,7 @@ impl OrderType {
                 | CloseUnstuckLong
                 | CloseAutoReduceLong
                 | ClosePanicLong
+                | CloseRiskyExposureLong
         )
     }
 }

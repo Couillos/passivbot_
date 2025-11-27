@@ -963,6 +963,9 @@ pub fn calc_closes_long_py(
     max_since_min: f64,
     max_since_open: f64,
     min_since_max: f64,
+    twe_exposure_risky_threshold: f64,
+    twe_exposure_risky_offload: f64,
+    close_grid_markup_start_risky_offload_pct: f64,
     order_book_ask: f64,
 ) -> Vec<(f64, f64, u16)> {
     let exchange_params = ExchangeParams {
@@ -992,6 +995,9 @@ pub fn calc_closes_long_py(
         close_trailing_threshold_pct,
         enforce_exposure_limit,
         wallet_exposure_limit,
+        twe_exposure_risky_threshold,
+        twe_exposure_risky_offload,
+        close_grid_markup_start_risky_offload_pct,
         ..Default::default()
     };
 
@@ -1043,6 +1049,9 @@ pub fn calc_closes_short_py(
     max_since_min: f64,
     max_since_open: f64,
     min_since_max: f64,
+    twe_exposure_risky_threshold: f64,
+    twe_exposure_risky_offload: f64,
+    close_grid_markup_start_risky_offload_pct: f64,
     order_book_bid: f64,
 ) -> Vec<(f64, f64, u16)> {
     let exchange_params = ExchangeParams {
@@ -1072,6 +1081,9 @@ pub fn calc_closes_short_py(
         close_trailing_threshold_pct,
         enforce_exposure_limit,
         wallet_exposure_limit,
+        twe_exposure_risky_threshold,
+        twe_exposure_risky_offload,
+        close_grid_markup_start_risky_offload_pct,
         ..Default::default()
     };
     let position = Position {
