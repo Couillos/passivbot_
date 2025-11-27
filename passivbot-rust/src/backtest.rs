@@ -2272,6 +2272,93 @@ impl<'a> Backtest<'a> {
         });
     }
     
+    fn adjust_hedge_size_incremental(&mut self, k: usize, idx: usize, target_size: f64, current_hedge_size: f64) -> bool {
+        let hedge_pos = match self.hedge_positions.get(&idx) {
+            Some(h) if h.is_active => h.clone(),
+            _ => return false,
+        };
+        
+        let difference = target_size - current_hedge_size;
+        let abs_difference = difference.abs();
+        let ep = &self.exchange_params_list[idx];
+        
+        // Check if difference is significant enough to adjust
+        if abs_difference < ep.min_qty {
+            return true; // Too small to adjust, consider it successful
+        }
+        
+        let close = self.hlcvs[[k, idx, CLOSE]];
+        if !close.is_finite() || close <= 0.0 {
+            return false;
+        }
+        
+        if difference > 0.0 {
+            // Short is SMALLER than long -> Need to OPEN more short
+            let fee_paid = -abs_difference * close * self.backtest_params.maker_fee;
+            self.update_balance(k, 0.0, fee_paid);
+            
+            // Update hedge size in tracking
+            if let Some(hedge) = self.hedge_positions.get_mut(&idx) {
+                hedge.size = target_size;
+            }
+            
+            // Record the adjustment fill
+            self.hedge_fills.push(HedgeFill {
+                index: k,
+                coin: self.backtest_params.coins[idx].clone(),
+                pnl: 0.0,
+                fee_paid,
+                balance_usd_total: self.balance.usd_total,
+                balance_btc: self.balance.btc,
+                balance_usd: self.balance.usd,
+                btc_price: self.btc_usd_prices[k],
+                fill_qty: abs_difference,
+                fill_price: close,
+                position_size: target_size,
+                is_entry: true, // Increasing hedge
+            });
+            
+            return true;
+            
+        } else {
+            // Short is LARGER than long -> Need to CLOSE part of short
+            let pnl = calc_pnl_short(
+                hedge_pos.entry_price,
+                close,
+                abs_difference, // Close this much
+                ep.c_mult,
+            );
+            let fee_paid = -abs_difference * close * self.backtest_params.maker_fee;
+            
+            self.update_balance(k, pnl, fee_paid);
+            
+            // Update hedge size in tracking
+            if let Some(hedge) = self.hedge_positions.get_mut(&idx) {
+                hedge.size = target_size;
+            }
+            
+            // Record the adjustment fill
+            self.hedge_fills.push(HedgeFill {
+                index: k,
+                coin: self.backtest_params.coins[idx].clone(),
+                pnl,
+                fee_paid,
+                balance_usd_total: self.balance.usd_total,
+                balance_btc: self.balance.btc,
+                balance_usd: self.balance.usd,
+                btc_price: self.btc_usd_prices[k],
+                fill_qty: abs_difference,
+                fill_price: close,
+                position_size: target_size,
+                is_entry: false, // Reducing hedge
+            });
+            
+            self.hedge_realized_pnl += pnl + fee_paid;
+            
+            return true;
+        }
+    }
+    
     fn check_hedge_exit(&mut self, k: usize, idx: usize) {
         let hedge_pos = match self.hedge_positions.get(&idx) {
             Some(h) if h.is_active => h.clone(),
@@ -2280,7 +2367,7 @@ impl<'a> Backtest<'a> {
         
         let close = self.hlcvs[[k, idx, CLOSE]];
         let high = self.hlcvs[[k, idx, HIGH]];
-        
+
         if !close.is_finite() || close <= 0.0 || !high.is_finite() {
             return;
         }
@@ -2324,23 +2411,35 @@ impl<'a> Backtest<'a> {
         }
         
         // ============================================================
-        // 1b. Verify size synchronization
+        // 1b. Verify size synchronization and adjust incrementally
         // ============================================================
-        // If long changed size (partial close), close hedge and will reopen if needed
+        // If long changed size, adjust the hedge (add or reduce) instead of closing completely
         if !should_exit {
             if let Some(long_pos) = self.positions.long.get(&idx) {
                 if let Some(short_pos) = self.positions.short.get(&idx) {
-                    let size_diff = (long_pos.size - short_pos.size.abs()).abs();
-                    let size_diff_pct = if long_pos.size > 0.0 {
-                        size_diff / long_pos.size
+                    let target_size = long_pos.size;
+                    let current_hedge_size = short_pos.size.abs();
+                    let size_diff = (target_size - current_hedge_size).abs();
+                    let size_diff_pct = if target_size > 0.0 {
+                        size_diff / target_size
                     } else {
                         0.0
                     };
                     
                     // Use configured tolerance to avoid adjusting for rounding
                     if size_diff_pct > bp.hedge_size_tolerance_pct {
-                        should_exit = true;
-                        exit_reason = "size_mismatch";
+                        // Instead of exiting, adjust the hedge size incrementally
+                        let adjustment_result = self.adjust_hedge_size_incremental(
+                            k, idx, target_size, current_hedge_size
+                        );
+                        
+                        if !adjustment_result {
+                            // If adjustment failed, close and let it reopen
+                            should_exit = true;
+                            exit_reason = "size_adjustment_failed";
+                        }
+                        // If adjustment succeeded, continue (don't exit)
+                        return;
                     }
                 }
             }
@@ -2367,9 +2466,9 @@ impl<'a> Backtest<'a> {
                 
                 if close <= breakeven_price {
                     // Move SL to entry price (breakeven)
-                    updated_hedge_pos.sl_price = updated_hedge_pos.entry_price;
-                    updated_hedge_pos.sl_moved_to_be = true;
-                    self.hedge_positions.insert(idx, updated_hedge_pos.clone());
+            updated_hedge_pos.sl_price = updated_hedge_pos.entry_price;
+            updated_hedge_pos.sl_moved_to_be = true;
+            self.hedge_positions.insert(idx, updated_hedge_pos.clone());
                 }
             }
         }
