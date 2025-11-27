@@ -18,7 +18,7 @@ use crate::utils::{
 };
 use ndarray::{ArrayView1, ArrayView3};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Clone, Default, Copy, Debug)]
 pub struct EmaAlphas {
@@ -188,6 +188,42 @@ pub struct TradingEnabled {
     short: bool,
 }
 
+#[derive(Debug, Default)]
+pub struct OperationTracker {
+    operations: HashMap<usize, VecDeque<u64>>,
+    max_ops: usize,
+    window_minutes: usize,
+}
+
+impl OperationTracker {
+    fn new(max_ops: usize, window_minutes: usize) -> Self {
+        OperationTracker {
+            operations: HashMap::new(),
+            max_ops,
+            window_minutes,
+        }
+    }
+    
+    fn can_operate(&mut self, idx: usize, k: usize) -> bool {
+        let ops = self.operations.entry(idx).or_insert_with(VecDeque::new);
+        let cutoff = k.saturating_sub(self.window_minutes) as u64;
+        
+        // Remove old operations outside the window
+        while ops.front().map_or(false, |&t| t < cutoff) {
+            ops.pop_front();
+        }
+        
+        ops.len() < self.max_ops
+    }
+    
+    fn record_operation(&mut self, idx: usize, k: usize) {
+        self.operations
+            .entry(idx)
+            .or_insert_with(VecDeque::new)
+            .push_back(k as u64);
+    }
+}
+
 // RollingSum (SMA) removed — volume & log range are now tracked via EMAs in `EMAs`.
 
 pub struct Backtest<'a> {
@@ -251,6 +287,8 @@ pub struct Backtest<'a> {
     hedge_volatility_sum: Vec<f64>,      // Running sum para volatilidad (unused for now)
     hedge_current_volatility: Vec<f64>,  // Volatilidad actual por coin
     hedge_prev_close: Vec<f64>,          // Precio close anterior (para True Range)
+    // Operation tracker for anti-loop protection
+    hedge_operation_tracker: OperationTracker,
 }
 
 impl<'a> Backtest<'a> {
@@ -500,6 +538,7 @@ impl<'a> Backtest<'a> {
             hedge_volatility_sum: vec![0.0; n_coins],
             hedge_current_volatility: vec![0.0; n_coins],
             hedge_prev_close: vec![0.0; n_coins],
+            hedge_operation_tracker: OperationTracker::new(3, 15), // 3 ops in 15 minutes
         }
     }
 
@@ -2114,6 +2153,11 @@ impl<'a> Backtest<'a> {
             return;
         }
         
+        // Verificar límite de operaciones (anti-loop protection)
+        if !self.hedge_operation_tracker.can_operate(idx, k) {
+            return;
+        }
+        
         let close = self.hlcvs[[k, idx, CLOSE]];
         if !close.is_finite() || close <= 0.0 {
             return;
@@ -2209,6 +2253,9 @@ impl<'a> Backtest<'a> {
             },
         );
         
+        // Registrar operación (anti-loop)
+        self.hedge_operation_tracker.record_operation(idx, k);
+        
         self.hedge_fills.push(HedgeFill {
             index: k,
             coin: self.backtest_params.coins[idx].clone(),
@@ -2238,6 +2285,24 @@ impl<'a> Backtest<'a> {
             return;
         }
         
+        // Verificar límite de operaciones antes de cerrar (anti-loop protection)
+        // Si no se puede operar, saltamos esta iteración
+        if !self.hedge_operation_tracker.can_operate(idx, k) {
+            return;
+        }
+        
+        // ============================================================
+        // EDGE CASE: Verificar si hedge fue cerrado inesperadamente
+        // ============================================================
+        // Si el hedge existe en nuestro tracking pero no hay posición short,
+        // significa que fue cerrado (SL ejecutado, etc.)
+        let hedge_exists_as_position = self.positions.short.contains_key(&idx);
+        if !hedge_exists_as_position {
+            // Hedge fue cerrado externamente (SL ejecutado en backtest)
+            self.hedge_positions.remove(&idx);
+            return;
+        }
+        
         let bp = &self.bot_params[idx].long;
         let mut updated_hedge_pos = hedge_pos.clone();
         let mut should_exit = false;
@@ -2255,6 +2320,29 @@ impl<'a> Backtest<'a> {
             if wallet_exposure < close_threshold {
                 should_exit = true;
                 exit_reason = "exposure_below_threshold";
+            }
+        }
+        
+        // ============================================================
+        // 1b. Verify size synchronization
+        // ============================================================
+        // If long changed size (partial close), close hedge and will reopen if needed
+        if !should_exit {
+            if let Some(long_pos) = self.positions.long.get(&idx) {
+                if let Some(short_pos) = self.positions.short.get(&idx) {
+                    let size_diff = (long_pos.size - short_pos.size.abs()).abs();
+                    let size_diff_pct = if long_pos.size > 0.0 {
+                        size_diff / long_pos.size
+                    } else {
+                        0.0
+                    };
+                    
+                    // Use configured tolerance to avoid adjusting for rounding
+                    if size_diff_pct > bp.hedge_size_tolerance_pct {
+                        should_exit = true;
+                        exit_reason = "size_mismatch";
+                    }
+                }
             }
         }
         
@@ -2379,6 +2467,10 @@ impl<'a> Backtest<'a> {
         });
         
         self.hedge_realized_pnl += pnl + fee_paid;
+        
+        // Registrar operación de cierre (anti-loop)
+        self.hedge_operation_tracker.record_operation(idx, k);
+        
         self.hedge_positions.remove(&idx);
     }
     

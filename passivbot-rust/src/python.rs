@@ -371,6 +371,7 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
             let val: f64 = extract_value(dict, "hedge_roc_period").unwrap_or(1.0);
             val.round() as usize
         },
+        hedge_size_tolerance_pct: extract_value(dict, "hedge_size_tolerance_pct").unwrap_or(0.01),
     })
 }
 

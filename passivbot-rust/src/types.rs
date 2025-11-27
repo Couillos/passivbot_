@@ -144,6 +144,7 @@ pub struct BotParams {
     pub hedge_high_volatility_threshold: f64,
     pub hedge_normal_volatility_threshold: f64,
     pub hedge_roc_period: usize,
+    pub hedge_size_tolerance_pct: f64,  // Tolerance for size mismatch (default: 0.01 = 1%)
 }
 
 #[derive(Debug)]
