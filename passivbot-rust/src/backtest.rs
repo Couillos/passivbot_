@@ -2124,10 +2124,17 @@ impl<'a> Backtest<'a> {
         
         if difference > 0.0 {
             // Increase hedge size (open more short)
+            // Update entry_price using weighted average
             let fee_paid = -abs_diff * close * self.backtest_params.maker_fee;
             self.update_balance(k, 0.0, fee_paid);
             
             if let Some(hedge) = self.hedge_positions.get_mut(&idx) {
+                // Calculate weighted average entry price
+                let old_size = hedge.size;
+                let new_size = target_size;
+                if new_size > 0.0 {
+                    hedge.entry_price = (hedge.entry_price * old_size + close * abs_diff) / new_size;
+                }
                 hedge.size = target_size;
             }
             
