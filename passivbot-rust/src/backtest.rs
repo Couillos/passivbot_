@@ -2076,22 +2076,46 @@ impl<'a> Backtest<'a> {
             close
         };
         
-        // Calculate PnL for short hedge
-        let pnl = calc_pnl_short(
+        // Calculate total PnL for short hedge (from entry to exit)
+        let pnl_total = calc_pnl_short(
             updated_hedge.entry_price,
             exit_price,
             -updated_hedge.size, // Negative size for short position
             ep.c_mult,
         );
+        
+        // Calculate the unrealized PnL that was already counted in the previous equity update
+        // The previous equity calculation (at k-1) included unrealized PnL based on close[k-1]
+        let price_for_previously_counted = if k > 0 {
+            self.hlcvs[[k - 1, idx, CLOSE]]
+        } else {
+            updated_hedge.entry_price  // No previous minute, no previously counted PnL
+        };
+        
+        let previously_counted_unrealized = if k > 0 {
+            calc_pnl_short(
+                updated_hedge.entry_price,
+                price_for_previously_counted,
+                -updated_hedge.size,
+                ep.c_mult,
+            )
+        } else {
+            0.0
+        };
+        
+        // Only add the NET new PnL to the balance (avoiding double counting)
+        // Net PnL = Total PnL - What was already counted as unrealized
+        let net_pnl_to_add_to_balance = pnl_total - previously_counted_unrealized;
+        
         let fee_paid = -updated_hedge.size * exit_price * self.backtest_params.maker_fee;
         
-        self.update_balance(k, pnl, fee_paid);
-        self.hedge_realized_pnl += pnl;
+        self.update_balance(k, net_pnl_to_add_to_balance, fee_paid);
+        self.hedge_realized_pnl += pnl_total;  // Track total for hedge_equity
         
         self.hedge_fills.push(HedgeFill {
             index: k,
             coin: self.backtest_params.coins[idx].clone(),
-            pnl,
+            pnl: pnl_total,  // Store total PnL for accurate fill tracking
             fee_paid,
             balance_usd_total: self.balance.usd_total,
             balance_btc: self.balance.btc,
@@ -2147,15 +2171,39 @@ impl<'a> Backtest<'a> {
         } else {
             // Decrease hedge size (close some short)
             let hedge_entry = self.hedge_positions[&idx].entry_price;
-            let pnl = calc_pnl_short(
+            
+            // Calculate total PnL for the portion being closed
+            let pnl_total = calc_pnl_short(
                 hedge_entry,
                 close,
                 -abs_diff,
                 ep.c_mult,
             );
+            
+            // Calculate previously counted unrealized PnL for this portion
+            let price_for_previously_counted = if k > 0 {
+                self.hlcvs[[k - 1, idx, CLOSE]]
+            } else {
+                hedge_entry
+            };
+            
+            let previously_counted_unrealized = if k > 0 {
+                calc_pnl_short(
+                    hedge_entry,
+                    price_for_previously_counted,
+                    -abs_diff,
+                    ep.c_mult,
+                )
+            } else {
+                0.0
+            };
+            
+            // Only add net new PnL to balance
+            let net_pnl_to_add = pnl_total - previously_counted_unrealized;
+            
             let fee_paid = -abs_diff * close * self.backtest_params.maker_fee;
             
-            self.update_balance(k, pnl, fee_paid);
+            self.update_balance(k, net_pnl_to_add, fee_paid);
             
             if let Some(hedge) = self.hedge_positions.get_mut(&idx) {
                 hedge.size = target_size;
@@ -2164,7 +2212,7 @@ impl<'a> Backtest<'a> {
             self.hedge_fills.push(HedgeFill {
                 index: k,
                 coin: self.backtest_params.coins[idx].clone(),
-                pnl,
+                pnl: pnl_total,  // Store total PnL for accurate tracking
                 fee_paid,
                 balance_usd_total: self.balance.usd_total,
                 balance_btc: self.balance.btc,
