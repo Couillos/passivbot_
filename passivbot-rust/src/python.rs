@@ -395,6 +395,10 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
         // Incremental adjustment
         hedge_enable_incremental_adjustment: extract_bool_value(dict, "hedge_enable_incremental_adjustment").unwrap_or(true),
         hedge_size_tolerance_pct: extract_value(dict, "hedge_size_tolerance_pct").unwrap_or(0.005),
+        // Risky exposure offload
+        twe_exposure_risky_threshold: extract_value(dict, "twe_exposure_risky_threshold").unwrap_or(0.0),
+        twe_exposure_risky_offload: extract_value(dict, "twe_exposure_risky_offload").unwrap_or(0.0),
+        close_grid_markup_start_risky_offload_pct: extract_value(dict, "close_grid_markup_start_risky_offload_pct").unwrap_or(0.0),
     })
 }
 
