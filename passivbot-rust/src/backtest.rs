@@ -2103,13 +2103,10 @@ impl<'a> Backtest<'a> {
             0.0
         };
         
-        // Do NOT add hedge PnL to balance to avoid asymmetric compounding
-        // The hedge protects positions but shouldn't inflate balance for position sizing
-        // Hedge PnL is tracked separately in hedge_realized_pnl and hedge_equity
-        
+        // Add PnL to balance (hedge unrealized is already in equity, so realized must go to balance)
         let fee_paid = -updated_hedge.size * exit_price * self.backtest_params.maker_fee;
         
-        self.update_balance(k, 0.0, fee_paid);  // Only deduct fees, not PnL
+        self.update_balance(k, pnl_total, fee_paid);
         self.hedge_realized_pnl += pnl_total;  // Track total for hedge_equity
         
         self.hedge_fills.push(HedgeFill {
@@ -2180,10 +2177,10 @@ impl<'a> Backtest<'a> {
                 ep.c_mult,
             );
             
-            // Do NOT add hedge PnL to balance (same reason as full close)
+            // Add PnL to balance (same reason as full close)
             let fee_paid = -abs_diff * close * self.backtest_params.maker_fee;
             
-            self.update_balance(k, 0.0, fee_paid);  // Only deduct fees, not PnL
+            self.update_balance(k, pnl_total, fee_paid);
             self.hedge_realized_pnl += pnl_total;  // Track total for hedge_equity
             
             if let Some(hedge) = self.hedge_positions.get_mut(&idx) {
