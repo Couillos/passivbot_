@@ -836,31 +836,9 @@ impl<'a> Backtest<'a> {
             equity_btc += upnl / self.btc_usd_prices[k];
         }
 
-        // Add unrealized PnL from hedge positions
-        let mut hedge_keys: Vec<usize> = self.hedge_positions.keys().cloned().collect();
-        hedge_keys.sort();
-        for idx in hedge_keys {
-            let hedge_pos = &self.hedge_positions[&idx];
-            if !hedge_pos.is_active {
-                continue;
-            }
-            if !self.coin_is_valid_at(idx, k) {
-                continue;
-            }
-            let current_price = self.hlcvs[[k, idx, CLOSE]];
-            if !current_price.is_finite() || current_price <= 0.0 {
-                continue;
-            }
-            // For short hedge positions: use calc_pnl_short for consistency
-            let upnl = calc_pnl_short(
-                hedge_pos.entry_price,
-                current_price,
-                hedge_pos.size,
-                self.exchange_params_list[idx].c_mult,
-            );
-            equity_usd += upnl;
-            equity_btc += upnl / self.btc_usd_prices[k];
-        }
+        // Do NOT add unrealized hedge PnL to main equity to prevent compounding
+        // Hedge equity is tracked separately in hedge_equity vector
+        // This ensures hedge profits don't inflate position sizing
 
         // Finally push the results into the Equities struct
         self.equities.usd.push(equity_usd);
@@ -2103,11 +2081,13 @@ impl<'a> Backtest<'a> {
             0.0
         };
         
-        // Add PnL to balance (hedge unrealized is already in equity, so realized must go to balance)
+        // Do NOT add hedge PnL to balance to prevent exponential compounding
+        // The hedge protects positions but shouldn't inflate the balance used for position sizing
+        // Hedge PnL is tracked separately in hedge_realized_pnl and shown in hedge_equity
         let fee_paid = -updated_hedge.size * exit_price * self.backtest_params.maker_fee;
         
-        self.update_balance(k, pnl_total, fee_paid);
-        self.hedge_realized_pnl += pnl_total;  // Track total for hedge_equity
+        self.update_balance(k, 0.0, fee_paid);  // Only deduct fees from balance
+        self.hedge_realized_pnl += pnl_total;  // Track realized PnL separately
         
         self.hedge_fills.push(HedgeFill {
             index: k,
@@ -2177,11 +2157,11 @@ impl<'a> Backtest<'a> {
                 ep.c_mult,
             );
             
-            // Add PnL to balance (same reason as full close)
+            // Do NOT add hedge PnL to balance (same reason as full close)
             let fee_paid = -abs_diff * close * self.backtest_params.maker_fee;
             
-            self.update_balance(k, pnl_total, fee_paid);
-            self.hedge_realized_pnl += pnl_total;  // Track total for hedge_equity
+            self.update_balance(k, 0.0, fee_paid);  // Only deduct fees
+            self.hedge_realized_pnl += pnl_total;  // Track realized PnL separately
             
             if let Some(hedge) = self.hedge_positions.get_mut(&idx) {
                 hedge.size = target_size;
