@@ -775,9 +775,12 @@ def plot_forager(
         ax = plt.gca()
     
     # Calculate total equity (balance + hedge PnL)
+    # Need to align hedge_equity with bal_eq indices
     if has_hedge_data:
         initial_balance = bal_eq["balance"].iloc[0]
-        total_with_hedge = bal_eq["balance"].values + hedge_equity
+        # Extract hedge_equity values at the same indices as bal_eq
+        hedge_equity_aligned = [hedge_equity[i] for i in bal_eq.index]
+        total_with_hedge = bal_eq["balance"].values + np.array(hedge_equity_aligned)
     
     # Plot 1: Long-only balance
     ax.plot(bal_eq.index, bal_eq["balance"], label="Long-Only Balance", 
@@ -822,7 +825,7 @@ def plot_forager(
     if has_hedge_data:
         initial_bal = bal_eq["balance"].iloc[0]
         final_bal = bal_eq["balance"].iloc[-1]
-        final_hedge = hedge_equity[-1]
+        final_hedge = hedge_equity_aligned[-1]
         final_total = total_with_hedge[-1]
         
         gain_long_only = (final_bal / initial_bal) - 1
@@ -895,11 +898,12 @@ def plot_forager(
     plt.figure(figsize=(29, 18))
     ax = plt.gca()
     
-    # Plot 3 lines like before
+    # Plot 3 lines like before (reuse hedge_equity_aligned and total_with_hedge from above)
     plt.plot(bal_eq.index, bal_eq["balance"], label="Long-Only Balance", 
              linewidth=2.5, color='#1f77b4')
     
     if has_hedge_data:
+        # total_with_hedge already calculated above, reuse it
         plt.plot(bal_eq.index, total_with_hedge, label="Total (Long + Hedge)", 
                  linewidth=2.5, color='#ff7f0e', linestyle='-')
     
