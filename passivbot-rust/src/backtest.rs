@@ -2103,13 +2103,13 @@ impl<'a> Backtest<'a> {
             0.0
         };
         
-        // Only add the NET new PnL to the balance (avoiding double counting)
-        // Net PnL = Total PnL - What was already counted as unrealized
-        let net_pnl_to_add_to_balance = pnl_total - previously_counted_unrealized;
+        // Do NOT add hedge PnL to balance to avoid asymmetric compounding
+        // The hedge protects positions but shouldn't inflate balance for position sizing
+        // Hedge PnL is tracked separately in hedge_realized_pnl and hedge_equity
         
         let fee_paid = -updated_hedge.size * exit_price * self.backtest_params.maker_fee;
         
-        self.update_balance(k, net_pnl_to_add_to_balance, fee_paid);
+        self.update_balance(k, 0.0, fee_paid);  // Only deduct fees, not PnL
         self.hedge_realized_pnl += pnl_total;  // Track total for hedge_equity
         
         self.hedge_fills.push(HedgeFill {
@@ -2180,30 +2180,11 @@ impl<'a> Backtest<'a> {
                 ep.c_mult,
             );
             
-            // Calculate previously counted unrealized PnL for this portion
-            let price_for_previously_counted = if k > 0 {
-                self.hlcvs[[k - 1, idx, CLOSE]]
-            } else {
-                hedge_entry
-            };
-            
-            let previously_counted_unrealized = if k > 0 {
-                calc_pnl_short(
-                    hedge_entry,
-                    price_for_previously_counted,
-                    -abs_diff,
-                    ep.c_mult,
-                )
-            } else {
-                0.0
-            };
-            
-            // Only add net new PnL to balance
-            let net_pnl_to_add = pnl_total - previously_counted_unrealized;
-            
+            // Do NOT add hedge PnL to balance (same reason as full close)
             let fee_paid = -abs_diff * close * self.backtest_params.maker_fee;
             
-            self.update_balance(k, net_pnl_to_add, fee_paid);
+            self.update_balance(k, 0.0, fee_paid);  // Only deduct fees, not PnL
+            self.hedge_realized_pnl += pnl_total;  // Track total for hedge_equity
             
             if let Some(hedge) = self.hedge_positions.get_mut(&idx) {
                 hedge.size = target_size;
