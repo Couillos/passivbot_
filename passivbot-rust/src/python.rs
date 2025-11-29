@@ -3,22 +3,25 @@ use crate::backtest::Backtest;
 use crate::closes::{
     calc_closes_long, calc_closes_short, calc_next_close_long, calc_next_close_short,
 };
+use crate::constants::CLOSE;
 use crate::entries::{
     calc_entries_long, calc_entries_short, calc_next_entry_long, calc_next_entry_short,
 };
+use crate::hedging::{calculate_roc, calculate_volatility_std};
 use crate::types::OrderType;
 use crate::types::{
     BacktestParams, BotParams, BotParamsPair, EMABands, ExchangeParams, HedgeEntryMode,
     HedgeExitMode, OrderBook, Position, StateParams, TrailingPriceBundle, VolatilityMethod,
 };
 use memmap::MmapOptions;
-use ndarray::{Array1, Array2, ArrayView};
+use ndarray::{Array1, Array2, ArrayView, ArrayView3};
 use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use serde::Serialize;
 use std::fs::File;
+use std::io::Write;
 use std::str::FromStr;
 
 #[pyfunction]
@@ -1143,4 +1146,117 @@ pub fn order_type_snake_to_id(name: &str) -> PyResult<u16> {
 #[pyfunction(name = "get_order_id_type_from_string")]
 pub fn get_order_id_type_from_string_alias(name: &str) -> PyResult<u16> {
     order_type_snake_to_id(name)
+}
+
+#[pyfunction]
+pub fn export_volatilities_to_csv(
+    shared_memory_file: &str,
+    hlcvs_shape: (usize, usize, usize),
+    hlcvs_dtype: &str,
+    bot_params: &PyAny,
+    backtest_params_dict: &PyDict,
+    output_csv_path: &str,
+) -> PyResult<()> {
+    // Open and map the HLCV shared memory file
+    let file = File::open(shared_memory_file)
+        .map_err(|e| PyValueError::new_err(format!("Unable to open shared memory file: {}", e)))?;
+    let mmap = unsafe {
+        MmapOptions::new()
+            .map(&file)
+            .map_err(|e| PyValueError::new_err(format!("Unable to map HLCV file: {}", e)))?
+    };
+    let hlcvs_rust = unsafe {
+        match hlcvs_dtype {
+            "<f8" => ArrayView3::from_shape_ptr(hlcvs_shape, mmap.as_ptr() as *const f64),
+            _ => return Err(PyValueError::new_err("Unsupported dtype for HLCV data")),
+        }
+    };
+
+    let bot_params_py_list = bot_params
+        .downcast::<PyList>()
+        .map_err(|_| PyValueError::new_err("bot_params must be a list[dict] (one per coin)"))?;
+
+    let mut bot_params_vec = Vec::with_capacity(bot_params_py_list.len());
+    for item in bot_params_py_list {
+        let dict = item
+            .downcast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("each bot_params element must be a dict"))?;
+        bot_params_vec.push(bot_params_pair_from_dict(dict)?);
+    }
+
+    let backtest_params = backtest_params_from_dict(backtest_params_dict)?;
+    let first_timestamp_ms = backtest_params.first_timestamp_ms;
+    let coins = &backtest_params.coins;
+    let n_timesteps = hlcvs_shape.0;
+    let n_coins = hlcvs_shape.1;
+
+    // Create CSV file
+    let mut csv_file = File::create(output_csv_path)
+        .map_err(|e| PyValueError::new_err(format!("Unable to create CSV file: {}", e)))?;
+
+    // Write header
+    writeln!(
+        csv_file,
+        "timestamp_ms,k,coin_idx,coin,volatility_std,volatility_roc,close_price,is_high_volatility,is_normal_volatility,high_volatility_threshold,normal_volatility_threshold"
+    )
+    .map_err(|e| PyValueError::new_err(format!("Unable to write CSV header: {}", e)))?;
+
+    // Calculate volatilities for each timestep and coin
+    for k in 0..n_timesteps {
+        let timestamp_ms = first_timestamp_ms + (k as u64) * 60_000u64;
+
+        for idx in 0..n_coins.min(bot_params_vec.len()) {
+            let coin_name = coins.get(idx).map(|s| s.as_str()).unwrap_or("unknown");
+            let bp = &bot_params_vec[idx].long; // Use long params for volatility calculation
+
+            // Calculate STD volatility
+            let volatility_std = calculate_volatility_std(
+                &hlcvs_rust,
+                k,
+                idx,
+                bp.hedge_volatility_period,
+            );
+
+            // Calculate ROC volatility
+            let volatility_roc = calculate_roc(
+                &hlcvs_rust,
+                k,
+                idx,
+                bp.hedge_roc_period,
+            );
+
+            // Get close price
+            let close_price = if k < hlcvs_rust.shape()[0] && idx < hlcvs_rust.shape()[1] {
+                hlcvs_rust[[k, idx, CLOSE]]
+            } else {
+                0.0
+            };
+
+            // Check thresholds
+            let is_high_volatility = volatility_std >= bp.hedge_high_volatility_threshold
+                || volatility_roc >= bp.hedge_high_volatility_threshold;
+            let is_normal_volatility = volatility_std <= bp.hedge_normal_volatility_threshold
+                || volatility_roc <= bp.hedge_normal_volatility_threshold;
+
+            // Write row
+            writeln!(
+                csv_file,
+                "{},{},{},{},{:.10},{:.10},{:.10},{},{},{:.10},{:.10}",
+                timestamp_ms,
+                k,
+                idx,
+                coin_name,
+                volatility_std,
+                volatility_roc,
+                close_price,
+                if is_high_volatility { 1 } else { 0 },
+                if is_normal_volatility { 1 } else { 0 },
+                bp.hedge_high_volatility_threshold,
+                bp.hedge_normal_volatility_threshold,
+            )
+            .map_err(|e| PyValueError::new_err(format!("Unable to write CSV row: {}", e)))?;
+        }
+    }
+
+    Ok(())
 }
