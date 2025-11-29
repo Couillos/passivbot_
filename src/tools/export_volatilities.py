@@ -9,7 +9,6 @@ import os
 import sys
 import argparse
 import logging
-import numpy as np
 
 # Agregar el directorio raíz al path para importar módulos
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -19,7 +18,6 @@ from tools.event_loop_policy import set_windows_event_loop_policy
 from config_utils import (
     load_config,
     require_config_value,
-    add_arguments_recursively,
     update_config_with_args,
     parse_overrides,
 )
@@ -151,10 +149,6 @@ async def main():
         help="Overrides de configuración en formato key=value,key2=value2",
     )
 
-    # Agregar argumentos recursivos desde el template de configuración
-    config_template = load_config("configs/template.json")
-    add_arguments_recursively(parser, config_template, prefix="")
-
     args = parser.parse_args()
 
     # Cargar configuración
@@ -164,9 +158,6 @@ async def main():
     if args.overrides:
         overrides_dict = parse_overrides(args.overrides)
         update_config_with_args(config, overrides_dict)
-
-    # Aplicar overrides desde argumentos de línea de comandos
-    update_config_with_args(config, vars(args))
 
     # Ejecutar exportación
     await export_volatilities(
