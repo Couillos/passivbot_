@@ -65,6 +65,14 @@ async def export_volatilities(
         f"Datos HLCV cargados: {len(coins)} monedas, {hlcvs.shape[0]} timesteps"
     )
 
+    # Configurar las monedas en la configuración si no están ya configuradas
+    if "backtest" not in config:
+        config["backtest"] = {}
+    if "coins" not in config["backtest"]:
+        config["backtest"]["coins"] = {}
+    if exchange not in config["backtest"]["coins"]:
+        config["backtest"]["coins"][exchange] = coins
+
     # Preparar parámetros del backtest
     bot_params_list, exchange_params, backtest_params = prep_backtest_args(
         config, mss, exchange
