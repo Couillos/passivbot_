@@ -122,6 +122,17 @@ def find_best_pareto(pareto_dir: str, mode: str = "weighted", weights: tuple = N
     return best_file
 
 
+def get_project_root():
+    """
+    Obtiene el directorio raíz del proyecto (dos niveles arriba desde src/tools/).
+    """
+    # Desde src/tools/backtest_pareto.py, subimos dos niveles para llegar a la raíz
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    tools_dir = os.path.dirname(script_dir)  # src/tools/ -> src/
+    project_root = os.path.dirname(tools_dir)  # src/ -> raíz del proyecto
+    return project_root
+
+
 def run_backtest(
     pareto_file: str,
     disable_plotting: bool = True,
@@ -135,13 +146,26 @@ def run_backtest(
         disable_plotting: Si True, deshabilita el plotting
         extra_args: Lista de argumentos adicionales para pasar al backtest
     """
+    # Obtener directorio raíz del proyecto
+    project_root = get_project_root()
+    
+    # Si pareto_file es relativo, hacerlo absoluto desde donde se ejecutó el script
+    if not os.path.isabs(pareto_file):
+        # Intentar desde el directorio actual primero
+        if os.path.exists(pareto_file):
+            pareto_file = os.path.abspath(pareto_file)
+        # Si no existe, intentar desde project_root
+        elif os.path.exists(os.path.join(project_root, pareto_file)):
+            pareto_file = os.path.abspath(os.path.join(project_root, pareto_file))
+    
     if not os.path.exists(pareto_file):
         raise ValueError(f"Archivo de Pareto no encontrado: {pareto_file}")
 
     logging.info(f"Ejecutando backtest con: {pareto_file}")
 
-    # Construir comando
-    cmd = [sys.executable, "backtest.py", pareto_file]
+    # Construir comando - usar ruta absoluta a src/backtest.py
+    backtest_script = os.path.join(project_root, "src", "backtest.py")
+    cmd = [sys.executable, backtest_script, pareto_file]
     
     if disable_plotting:
         cmd.append("-dp")
@@ -150,9 +174,10 @@ def run_backtest(
         cmd.extend(extra_args)
 
     logging.info(f"Comando: {' '.join(cmd)}")
+    logging.info(f"Directorio de trabajo: {project_root}")
     
-    # Ejecutar backtest
-    result = subprocess.run(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
+    # Ejecutar backtest desde el directorio raíz del proyecto
+    result = subprocess.run(cmd, cwd=project_root)
     
     if result.returncode != 0:
         logging.error(f"Backtest falló con código de salida: {result.returncode}")
@@ -212,26 +237,51 @@ def main():
     )
 
     args = parser.parse_args()
+    
+    # Obtener directorio raíz del proyecto para resolver rutas relativas
+    project_root = get_project_root()
 
     # Determinar qué archivo de Pareto usar
     if args.file:
         pareto_file = args.file
+        # Si es relativo, intentar resolver desde project_root
+        if not os.path.isabs(pareto_file) and not os.path.exists(pareto_file):
+            candidate = os.path.join(project_root, pareto_file)
+            if os.path.exists(candidate):
+                pareto_file = candidate
         logging.info(f"Usando archivo de Pareto especificado: {pareto_file}")
     elif args.index is not None:
         if not args.pareto_dir:
             logging.error("Se requiere --pareto-dir cuando se usa --index")
             sys.exit(1)
+        # Resolver ruta relativa si es necesario
+        if not os.path.isabs(args.pareto_dir) and not os.path.exists(args.pareto_dir):
+            candidate = os.path.join(project_root, args.pareto_dir)
+            if os.path.exists(candidate):
+                args.pareto_dir = candidate
         # Importar función de paretos.py
         sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
         from paretos import get_pareto_by_index
         pareto_file = get_pareto_by_index(args.pareto_dir, args.index)
+        # Hacer absoluta si es relativa
+        if not os.path.isabs(pareto_file):
+            pareto_file = os.path.abspath(pareto_file)
         logging.info(f"Usando Pareto en índice {args.index}: {pareto_file}")
     elif args.pareto_dir:
+        # Resolver ruta relativa si es necesario
+        if not os.path.isabs(args.pareto_dir) and not os.path.exists(args.pareto_dir):
+            candidate = os.path.join(project_root, args.pareto_dir)
+            if os.path.exists(candidate):
+                args.pareto_dir = candidate
         pareto_file = find_best_pareto(args.pareto_dir, mode=args.mode, weights=args.weights)
+        # Hacer absoluta si es relativa
+        if not os.path.isabs(pareto_file):
+            pareto_file = os.path.abspath(pareto_file)
         logging.info(f"Usando mejor Pareto encontrado: {pareto_file}")
     else:
         # Buscar el último directorio de optimize_results
-        optimize_results_dir = "optimize_results"
+        optimize_results_dir = os.path.join(project_root, "optimize_results")
+        
         if not os.path.exists(optimize_results_dir):
             logging.error(f"Directorio {optimize_results_dir} no encontrado")
             sys.exit(1)
