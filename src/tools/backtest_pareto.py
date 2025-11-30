@@ -141,7 +141,7 @@ def run_backtest(
     logging.info(f"Ejecutando backtest con: {pareto_file}")
 
     # Construir comando
-    cmd = [sys.executable, "src/backtest.py", pareto_file]
+    cmd = [sys.executable, "backtest.py", pareto_file]
     
     if disable_plotting:
         cmd.append("-dp")
