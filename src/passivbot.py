@@ -2011,6 +2011,9 @@ class Passivbot:
                         self.trailing_prices[symbol][pside]["max_since_min"],
                         self.trailing_prices[symbol][pside]["max_since_open"],
                         self.trailing_prices[symbol][pside]["min_since_max"],
+                        self.bp(pside, "twe_exposure_risky_threshold", symbol),
+                        self.bp(pside, "twe_exposure_risky_offload", symbol),
+                        self.bp(pside, "close_grid_markup_start_risky_offload_pct", symbol),
                         last_prices[symbol],
                     )
                     ideal_orders[symbol] += [

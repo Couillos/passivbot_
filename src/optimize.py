@@ -149,7 +149,12 @@ def extract_bounds_tuple_list_from_config(config) -> [Bound]:
 
 
 def get_bound_keys_ignored():
-    return ["enforce_exposure_limit"]
+    return [
+        "enforce_exposure_limit",
+        "hedge_entry_mode",  # Enum/string, not optimizable
+        "hedge_exit_mode",   # Enum/string, not optimizable
+        "hedge_volatility_method",  # Enum/string, not optimizable
+    ]
 
 
 # ============================================================================

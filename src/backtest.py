@@ -774,11 +774,29 @@ def plot_forager(
         fig = plt.figure(figsize=(29, 18))
         ax = plt.gca()
     
-    ax.plot(bal_eq.index, bal_eq["balance"], label="Balance")
-    ax.plot(bal_eq.index, bal_eq["equity"], label="Equity")
+    # Calculate total equity (balance + hedge PnL)
+    # Need to align hedge_equity with bal_eq indices
+    if has_hedge_data:
+        initial_balance = bal_eq["balance"].iloc[0]
+        # Extract hedge_equity values at the same indices as bal_eq
+        hedge_equity_aligned = [hedge_equity[i] for i in bal_eq.index]
+        total_with_hedge = bal_eq["balance"].values + np.array(hedge_equity_aligned)
+    
+    # Plot 1: Long-only balance
+    ax.plot(bal_eq.index, bal_eq["balance"], label="Long-Only Balance", 
+            linewidth=2.5, color='#1f77b4')
+    
+    # Plot 2: Total (Long + Hedge)
+    if has_hedge_data:
+        ax.plot(bal_eq.index, total_with_hedge, label="Total (Long + Hedge)", 
+                linewidth=2.5, color='#ff7f0e', linestyle='-')
+    
+    # Plot 3: Equity (with unrealized)
+    ax.plot(bal_eq.index, bal_eq["equity"], label="Equity (unrealized)", 
+            linewidth=1.5, color='#d62728', alpha=0.7, linestyle='--')
     
     ax.grid()
-    ax.legend()
+    ax.legend(loc='upper left', fontsize=14)
     
     metrics = [
         ("adg", analysis.get("adg")),
@@ -802,7 +820,25 @@ def plot_forager(
         ("positions_held_per_day", analysis.get("positions_held_per_day")),
     ]
     metrics_text = "\n".join([f"{k}: {v:.6g}" if v is not None else f"{k}: -" for k, v in metrics])
-    ax.text(0.006, 0.9914, metrics_text, fontsize=18, color="white", va="top", ha="left", 
+    
+    # Add hedge impact metrics if available
+    if has_hedge_data:
+        initial_bal = bal_eq["balance"].iloc[0]
+        final_bal = bal_eq["balance"].iloc[-1]
+        final_hedge = hedge_equity_aligned[-1]
+        final_total = total_with_hedge[-1]
+        
+        gain_long_only = (final_bal / initial_bal) - 1
+        gain_total = (final_total / initial_bal) - 1
+        hedge_contribution = final_hedge / (final_total - initial_bal) if (final_total - initial_bal) > 0 else 0
+        
+        metrics_text += f"\n\n=== HEDGE IMPACT ==="
+        metrics_text += f"\nLong gain: {gain_long_only*100:.1f}%"
+        metrics_text += f"\nHedge PnL: ${final_hedge:,.0f}"
+        metrics_text += f"\nTotal gain: {gain_total*100:.1f}%"
+        metrics_text += f"\nHedge %: {hedge_contribution*100:.1f}%"
+    
+    ax.text(0.006, 0.9914, metrics_text, fontsize=16, color="white", va="top", ha="left", 
             family="monospace", transform=ax.transAxes, 
             bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
     
@@ -862,14 +898,24 @@ def plot_forager(
     plt.figure(figsize=(29, 18))
     ax = plt.gca()
     
-    plt.plot(bal_eq.index, bal_eq["balance"], label="Balance")
-    plt.plot(bal_eq.index, bal_eq["equity"], label="Equity")
+    # Plot 3 lines like before (reuse hedge_equity_aligned and total_with_hedge from above)
+    plt.plot(bal_eq.index, bal_eq["balance"], label="Long-Only Balance", 
+             linewidth=2.5, color='#1f77b4')
+    
+    if has_hedge_data:
+        # total_with_hedge already calculated above, reuse it
+        plt.plot(bal_eq.index, total_with_hedge, label="Total (Long + Hedge)", 
+                 linewidth=2.5, color='#ff7f0e', linestyle='-')
+    
+    plt.plot(bal_eq.index, bal_eq["equity"], label="Equity (unrealized)", 
+             linewidth=1.5, color='#d62728', alpha=0.7, linestyle='--')
     plt.yscale('log')
     
     plt.grid()
-    plt.legend()
+    plt.legend(loc='upper left', fontsize=14)
     
-    ax.text(0.006, 0.9914, metrics_text, fontsize=18, color="white", va="top", ha="left", 
+    # Use same metrics_text with hedge info
+    ax.text(0.006, 0.9914, metrics_text, fontsize=16, color="white", va="top", ha="left", 
             family="monospace", transform=ax.transAxes, 
             bbox=dict(facecolor='#222222', alpha=0.8, boxstyle='round,pad=0.5'))
     

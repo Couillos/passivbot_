@@ -3,22 +3,25 @@ use crate::backtest::Backtest;
 use crate::closes::{
     calc_closes_long, calc_closes_short, calc_next_close_long, calc_next_close_short,
 };
+use crate::constants::CLOSE;
 use crate::entries::{
     calc_entries_long, calc_entries_short, calc_next_entry_long, calc_next_entry_short,
 };
+use crate::hedging::{calculate_roc, calculate_volatility_std};
 use crate::types::OrderType;
 use crate::types::{
-    BacktestParams, BotParams, BotParamsPair, EMABands, ExchangeParams, OrderBook, Position,
-    StateParams, TrailingPriceBundle,
+    BacktestParams, BotParams, BotParamsPair, EMABands, ExchangeParams, HedgeEntryMode,
+    HedgeExitMode, OrderBook, Position, StateParams, TrailingPriceBundle, VolatilityMethod,
 };
 use memmap::MmapOptions;
-use ndarray::{Array1, Array2, ArrayView};
+use ndarray::{Array1, Array2, ArrayView, ArrayView3};
 use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use serde::Serialize;
 use std::fs::File;
+use std::io::Write;
 use std::str::FromStr;
 
 #[pyfunction]
@@ -323,20 +326,82 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
         unstuck_loss_allowance_pct: extract_value(dict, "unstuck_loss_allowance_pct")?,
         unstuck_threshold: extract_value(dict, "unstuck_threshold")?,
         hedge_enabled: extract_bool_value(dict, "hedge_enabled").unwrap_or(false),
-        hedge_sma_len: {
-            let val: f64 = extract_value(dict, "hedge_sma_len").unwrap_or(10.0);
+        // ATR parameters
+        hedge_atr_period: {
+            let val: f64 = extract_value(dict, "hedge_atr_period").unwrap_or(14.0);
             val.round() as usize
         },
-        hedge_fall_pct: extract_value(dict, "hedge_fall_pct").unwrap_or(0.20),
-        hedge_sl_pct: extract_value(dict, "hedge_sl_pct").unwrap_or(0.008),
-        hedge_t_sl_to_be_minutes: {
-            let val: f64 = extract_value(dict, "hedge_t_sl_to_be_minutes").unwrap_or(30.0);
+        hedge_distance_atr_trigger: extract_value(dict, "hedge_distance_atr_trigger").unwrap_or(3.0),
+        hedge_stop_loss_atr: extract_value(dict, "hedge_stop_loss_atr").unwrap_or(2.0),
+        hedge_breakeven_atr: extract_value(dict, "hedge_breakeven_atr").unwrap_or(1.0),
+        // Exposure (hysteresis)
+        hedge_min_exposure_pct: extract_value(dict, "hedge_min_exposure_pct").unwrap_or(0.95),
+        hedge_min_exposure_pct_to_close: extract_value(dict, "hedge_min_exposure_pct_to_close").unwrap_or(0.90),
+        // Modes
+        hedge_entry_mode: {
+            let mode: String = dict
+                .get_item("hedge_entry_mode")
+                .ok()
+                .flatten()
+                .and_then(|item| item.extract().ok())
+                .unwrap_or_else(|| "atr_only".to_string());
+            match mode.as_str() {
+                "volatility_only" => HedgeEntryMode::VolatilityOnly,
+                "atr_and_volatility" => HedgeEntryMode::AtrAndVolatility,
+                _ => HedgeEntryMode::AtrOnly,
+            }
+        },
+        hedge_exit_mode: {
+            let mode: String = dict
+                .get_item("hedge_exit_mode")
+                .ok()
+                .flatten()
+                .and_then(|item| item.extract().ok())
+                .unwrap_or_else(|| "standard".to_string());
+            match mode.as_str() {
+                "with_volatility" => HedgeExitMode::WithVolatility,
+                _ => HedgeExitMode::Standard,
+            }
+        },
+        // Volatility
+        hedge_volatility_method: {
+            let method: String = dict
+                .get_item("hedge_volatility_method")
+                .ok()
+                .flatten()
+                .and_then(|item| item.extract().ok())
+                .unwrap_or_else(|| "std".to_string());
+            match method.as_str() {
+                "roc" => VolatilityMethod::Roc,
+                _ => VolatilityMethod::Std,
+            }
+        },
+        hedge_volatility_period: {
+            let val: f64 = extract_value(dict, "hedge_volatility_period").unwrap_or(20.0);
             val.round() as usize
         },
-        hedge_max_duration_minutes: {
-            let val: f64 = extract_value(dict, "hedge_max_duration_minutes").unwrap_or(0.0);
+        hedge_high_volatility_threshold: extract_value(dict, "hedge_high_volatility_threshold").unwrap_or(0.02),
+        hedge_normal_volatility_threshold: extract_value(dict, "hedge_normal_volatility_threshold").unwrap_or(0.01),
+        hedge_roc_period: {
+            let val: f64 = extract_value(dict, "hedge_roc_period").unwrap_or(1.0);
             val.round() as usize
         },
+        // Anti-loop
+        hedge_max_operations_window: {
+            let val: f64 = extract_value(dict, "hedge_max_operations_window").unwrap_or(3.0);
+            val.round() as usize
+        },
+        hedge_operation_window_minutes: {
+            let val: f64 = extract_value(dict, "hedge_operation_window_minutes").unwrap_or(15.0);
+            val.round() as usize
+        },
+        // Incremental adjustment
+        hedge_enable_incremental_adjustment: extract_bool_value(dict, "hedge_enable_incremental_adjustment").unwrap_or(true),
+        hedge_size_tolerance_pct: extract_value(dict, "hedge_size_tolerance_pct").unwrap_or(0.005),
+        // Risky exposure offload
+        twe_exposure_risky_threshold: extract_value(dict, "twe_exposure_risky_threshold").unwrap_or(0.0),
+        twe_exposure_risky_offload: extract_value(dict, "twe_exposure_risky_offload").unwrap_or(0.0),
+        close_grid_markup_start_risky_offload_pct: extract_value(dict, "close_grid_markup_start_risky_offload_pct").unwrap_or(0.0),
     })
 }
 
@@ -905,6 +970,9 @@ pub fn calc_closes_long_py(
     max_since_min: f64,
     max_since_open: f64,
     min_since_max: f64,
+    twe_exposure_risky_threshold: f64,
+    twe_exposure_risky_offload: f64,
+    close_grid_markup_start_risky_offload_pct: f64,
     order_book_ask: f64,
 ) -> Vec<(f64, f64, u16)> {
     let exchange_params = ExchangeParams {
@@ -934,6 +1002,9 @@ pub fn calc_closes_long_py(
         close_trailing_threshold_pct,
         enforce_exposure_limit,
         wallet_exposure_limit,
+        twe_exposure_risky_threshold,
+        twe_exposure_risky_offload,
+        close_grid_markup_start_risky_offload_pct,
         ..Default::default()
     };
 
@@ -985,6 +1056,9 @@ pub fn calc_closes_short_py(
     max_since_min: f64,
     max_since_open: f64,
     min_since_max: f64,
+    twe_exposure_risky_threshold: f64,
+    twe_exposure_risky_offload: f64,
+    close_grid_markup_start_risky_offload_pct: f64,
     order_book_bid: f64,
 ) -> Vec<(f64, f64, u16)> {
     let exchange_params = ExchangeParams {
@@ -1014,6 +1088,9 @@ pub fn calc_closes_short_py(
         close_trailing_threshold_pct,
         enforce_exposure_limit,
         wallet_exposure_limit,
+        twe_exposure_risky_threshold,
+        twe_exposure_risky_offload,
+        close_grid_markup_start_risky_offload_pct,
         ..Default::default()
     };
     let position = Position {
@@ -1069,4 +1146,117 @@ pub fn order_type_snake_to_id(name: &str) -> PyResult<u16> {
 #[pyfunction(name = "get_order_id_type_from_string")]
 pub fn get_order_id_type_from_string_alias(name: &str) -> PyResult<u16> {
     order_type_snake_to_id(name)
+}
+
+#[pyfunction]
+pub fn export_volatilities_to_csv(
+    shared_memory_file: &str,
+    hlcvs_shape: (usize, usize, usize),
+    hlcvs_dtype: &str,
+    bot_params: &PyAny,
+    backtest_params_dict: &PyDict,
+    output_csv_path: &str,
+) -> PyResult<()> {
+    // Open and map the HLCV shared memory file
+    let file = File::open(shared_memory_file)
+        .map_err(|e| PyValueError::new_err(format!("Unable to open shared memory file: {}", e)))?;
+    let mmap = unsafe {
+        MmapOptions::new()
+            .map(&file)
+            .map_err(|e| PyValueError::new_err(format!("Unable to map HLCV file: {}", e)))?
+    };
+    let hlcvs_rust = unsafe {
+        match hlcvs_dtype {
+            "<f8" => ArrayView3::from_shape_ptr(hlcvs_shape, mmap.as_ptr() as *const f64),
+            _ => return Err(PyValueError::new_err("Unsupported dtype for HLCV data")),
+        }
+    };
+
+    let bot_params_py_list = bot_params
+        .downcast::<PyList>()
+        .map_err(|_| PyValueError::new_err("bot_params must be a list[dict] (one per coin)"))?;
+
+    let mut bot_params_vec = Vec::with_capacity(bot_params_py_list.len());
+    for item in bot_params_py_list {
+        let dict = item
+            .downcast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("each bot_params element must be a dict"))?;
+        bot_params_vec.push(bot_params_pair_from_dict(dict)?);
+    }
+
+    let backtest_params = backtest_params_from_dict(backtest_params_dict)?;
+    let first_timestamp_ms = backtest_params.first_timestamp_ms;
+    let coins = &backtest_params.coins;
+    let n_timesteps = hlcvs_shape.0;
+    let n_coins = hlcvs_shape.1;
+
+    // Create CSV file
+    let mut csv_file = File::create(output_csv_path)
+        .map_err(|e| PyValueError::new_err(format!("Unable to create CSV file: {}", e)))?;
+
+    // Write header
+    writeln!(
+        csv_file,
+        "timestamp_ms,k,coin_idx,coin,volatility_std,volatility_roc,close_price,is_high_volatility,is_normal_volatility,high_volatility_threshold,normal_volatility_threshold"
+    )
+    .map_err(|e| PyValueError::new_err(format!("Unable to write CSV header: {}", e)))?;
+
+    // Calculate volatilities for each timestep and coin
+    for k in 0..n_timesteps {
+        let timestamp_ms = first_timestamp_ms + (k as u64) * 60_000u64;
+
+        for idx in 0..n_coins.min(bot_params_vec.len()) {
+            let coin_name = coins.get(idx).map(|s| s.as_str()).unwrap_or("unknown");
+            let bp = &bot_params_vec[idx].long; // Use long params for volatility calculation
+
+            // Calculate STD volatility
+            let volatility_std = calculate_volatility_std(
+                &hlcvs_rust,
+                k,
+                idx,
+                bp.hedge_volatility_period,
+            );
+
+            // Calculate ROC volatility
+            let volatility_roc = calculate_roc(
+                &hlcvs_rust,
+                k,
+                idx,
+                bp.hedge_roc_period,
+            );
+
+            // Get close price
+            let close_price = if k < hlcvs_rust.shape()[0] && idx < hlcvs_rust.shape()[1] {
+                hlcvs_rust[[k, idx, CLOSE]]
+            } else {
+                0.0
+            };
+
+            // Check thresholds
+            let is_high_volatility = volatility_std >= bp.hedge_high_volatility_threshold
+                || volatility_roc >= bp.hedge_high_volatility_threshold;
+            let is_normal_volatility = volatility_std <= bp.hedge_normal_volatility_threshold
+                || volatility_roc <= bp.hedge_normal_volatility_threshold;
+
+            // Write row
+            writeln!(
+                csv_file,
+                "{},{},{},{},{:.10},{:.10},{:.10},{},{},{:.10},{:.10}",
+                timestamp_ms,
+                k,
+                idx,
+                coin_name,
+                volatility_std,
+                volatility_roc,
+                close_price,
+                if is_high_volatility { 1 } else { 0 },
+                if is_normal_volatility { 1 } else { 0 },
+                bp.hedge_high_volatility_threshold,
+                bp.hedge_normal_volatility_threshold,
+            )
+            .map_err(|e| PyValueError::new_err(format!("Unable to write CSV row: {}", e)))?;
+        }
+    }
+
+    Ok(())
 }

@@ -88,6 +88,71 @@ pub struct StateParams {
     pub grid_log_range: f64,
 }
 
+// ========== HEDGING ENUMS ==========
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HedgeEntryMode {
+    AtrOnly,
+    VolatilityOnly,
+    AtrAndVolatility,
+}
+
+impl Default for HedgeEntryMode {
+    fn default() -> Self {
+        HedgeEntryMode::AtrOnly
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HedgeExitMode {
+    Standard,
+    WithVolatility,
+}
+
+impl Default for HedgeExitMode {
+    fn default() -> Self {
+        HedgeExitMode::Standard
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolatilityMethod {
+    Std,
+    Roc,
+}
+
+impl Default for VolatilityMethod {
+    fn default() -> Self {
+        VolatilityMethod::Std
+    }
+}
+
+// ========== OPERATION TRACKER (ANTI-LOOP) ==========
+
+#[derive(Debug, Clone)]
+pub struct OperationRecord {
+    pub timestamp_minutes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OperationTracker {
+    pub records: Vec<OperationRecord>,
+}
+
+impl OperationTracker {
+    pub fn can_operate(&mut self, current_k: u64, max_ops: usize, window_minutes: usize) -> bool {
+        let cutoff = current_k.saturating_sub(window_minutes as u64);
+        self.records.retain(|r| r.timestamp_minutes >= cutoff);
+        self.records.len() < max_ops
+    }
+    
+    pub fn record_operation(&mut self, current_k: u64) {
+        self.records.push(OperationRecord {
+            timestamp_minutes: current_k,
+        });
+    }
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct BotParamsPair {
     pub long: BotParams,
@@ -128,11 +193,33 @@ pub struct BotParams {
     pub unstuck_loss_allowance_pct: f64,
     pub unstuck_threshold: f64,
     pub hedge_enabled: bool,
-    pub hedge_sma_len: usize,
-    pub hedge_fall_pct: f64,
-    pub hedge_sl_pct: f64,
-    pub hedge_t_sl_to_be_minutes: usize,
-    pub hedge_max_duration_minutes: usize,
+    // Hedging with ATR
+    pub hedge_atr_period: usize,
+    pub hedge_distance_atr_trigger: f64,
+    pub hedge_stop_loss_atr: f64,
+    pub hedge_breakeven_atr: f64,
+    // Exposure (hysteresis)
+    pub hedge_min_exposure_pct: f64,
+    pub hedge_min_exposure_pct_to_close: f64,
+    // Modes
+    pub hedge_entry_mode: HedgeEntryMode,
+    pub hedge_exit_mode: HedgeExitMode,
+    // Volatility
+    pub hedge_volatility_method: VolatilityMethod,
+    pub hedge_volatility_period: usize,
+    pub hedge_high_volatility_threshold: f64,
+    pub hedge_normal_volatility_threshold: f64,
+    pub hedge_roc_period: usize,
+    // Anti-loop
+    pub hedge_max_operations_window: usize,
+    pub hedge_operation_window_minutes: usize,
+    // Incremental adjustment
+    pub hedge_enable_incremental_adjustment: bool,
+    pub hedge_size_tolerance_pct: f64,
+    // Risky exposure offload
+    pub twe_exposure_risky_threshold: f64,
+    pub twe_exposure_risky_offload: f64,
+    pub close_grid_markup_start_risky_offload_pct: f64,
 }
 
 #[derive(Debug)]
@@ -197,6 +284,9 @@ pub enum OrderType {
     ClosePanicLong = 22,
     ClosePanicShort = 23,
 
+    CloseRiskyExposureLong = 24,
+    CloseRiskyExposureShort = 25,
+
     Empty = 65535,
 }
 
@@ -229,6 +319,7 @@ impl OrderType {
                 | CloseUnstuckLong
                 | CloseAutoReduceLong
                 | ClosePanicLong
+                | CloseRiskyExposureLong
         )
     }
 }
@@ -271,9 +362,9 @@ pub struct HedgePosition {
     pub size: f64,
     pub entry_price: f64,
     pub is_active: bool,
-    pub entry_timestamp_minutes: u64, // Index k (in minutes from backtest start)
     pub sl_price: f64,
     pub sl_moved_to_be: bool,
+    pub atr_at_entry: f64,
 }
 
 #[derive(Debug, Clone)]

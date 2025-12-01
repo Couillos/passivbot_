@@ -676,6 +676,101 @@ pub fn calc_next_close_short(
     }
 }
 
+pub fn calc_risky_exposure_close_long(
+    exchange_params: &ExchangeParams,
+    state_params: &StateParams,
+    bot_params: &BotParams,
+    position: &Position,
+) -> Order {
+    if position.size <= 0.0 {
+        return Order::default();
+    }
+    if bot_params.twe_exposure_risky_threshold <= 0.0 {
+        return Order::default();
+    }
+    let wallet_exposure = calc_wallet_exposure(
+        exchange_params.c_mult,
+        state_params.balance,
+        position.size,
+        position.price,
+    );
+    let wallet_exposure_ratio = if bot_params.wallet_exposure_limit <= 0.0 {
+        10.0
+    } else {
+        wallet_exposure / bot_params.wallet_exposure_limit
+    };
+    if wallet_exposure_ratio <= bot_params.twe_exposure_risky_threshold {
+        return Order::default();
+    }
+    let close_qty = -round_(
+        position.size * bot_params.twe_exposure_risky_offload,
+        exchange_params.qty_step,
+    );
+    let close_price = f64::max(
+        state_params.order_book.ask,
+        round_up(
+            position.price
+                * (1.0
+                    + bot_params.close_grid_markup_start
+                        * bot_params.close_grid_markup_start_risky_offload_pct),
+            exchange_params.price_step,
+        ),
+    );
+    Order {
+        qty: close_qty,
+        price: close_price,
+        order_type: OrderType::CloseRiskyExposureLong,
+    }
+}
+
+pub fn calc_risky_exposure_close_short(
+    exchange_params: &ExchangeParams,
+    state_params: &StateParams,
+    bot_params: &BotParams,
+    position: &Position,
+) -> Order {
+    let position_size_abs = position.size.abs();
+    if position_size_abs == 0.0 {
+        return Order::default();
+    }
+    if bot_params.twe_exposure_risky_threshold <= 0.0 {
+        return Order::default();
+    }
+    let wallet_exposure = calc_wallet_exposure(
+        exchange_params.c_mult,
+        state_params.balance,
+        position_size_abs,
+        position.price,
+    );
+    let wallet_exposure_ratio = if bot_params.wallet_exposure_limit <= 0.0 {
+        10.0
+    } else {
+        wallet_exposure / bot_params.wallet_exposure_limit
+    };
+    if wallet_exposure_ratio <= bot_params.twe_exposure_risky_threshold {
+        return Order::default();
+    }
+    let close_qty = round_(
+        position_size_abs * bot_params.twe_exposure_risky_offload,
+        exchange_params.qty_step,
+    );
+    let close_price = f64::min(
+        state_params.order_book.bid,
+        round_dn(
+            position.price
+                * (1.0
+                    - bot_params.close_grid_markup_start
+                        * bot_params.close_grid_markup_start_risky_offload_pct),
+            exchange_params.price_step,
+        ),
+    );
+    Order {
+        qty: close_qty,
+        price: close_price,
+        order_type: OrderType::CloseRiskyExposureShort,
+    }
+}
+
 pub fn calc_closes_long(
     exchange_params: &ExchangeParams,
     state_params: &StateParams,
@@ -720,6 +815,16 @@ pub fn calc_closes_long(
             }
         }
         closes.push(close);
+    }
+    // Add risky exposure close if applicable
+    let risky_close = calc_risky_exposure_close_long(
+        exchange_params,
+        state_params,
+        bot_params,
+        position,
+    );
+    if risky_close.qty != 0.0 {
+        closes.push(risky_close);
     }
     closes.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
     closes
@@ -769,6 +874,16 @@ pub fn calc_closes_short(
             }
         }
         closes.push(close);
+    }
+    // Add risky exposure close if applicable
+    let risky_close = calc_risky_exposure_close_short(
+        exchange_params,
+        state_params,
+        bot_params,
+        position,
+    );
+    if risky_close.qty != 0.0 {
+        closes.push(risky_close);
     }
     closes.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
     closes

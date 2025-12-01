@@ -3,6 +3,7 @@ mod backtest;
 mod closes;
 mod constants;
 mod entries;
+mod hedging;
 mod python;
 mod trailing_flip;
 mod types;
@@ -48,6 +49,7 @@ fn passivbot_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(all_order_types_ids, m)?)?;
     m.add_function(wrap_pyfunction!(order_type_snake_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(get_order_id_type_from_string_alias, m)?)?;
+    m.add_function(wrap_pyfunction!(export_volatilities_to_csv, m)?)?;
 
     Ok(())
 }
